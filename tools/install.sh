@@ -61,6 +61,9 @@ if [ "${INSTALL_PSK_SERVICE:-0}" = 1 ]; then
 else
     echo "PSK boot service not enabled; the driver provisions PSK on activation."
 fi
+if sudo systemctl cat fprintd.service >/dev/null 2>&1; then
+    sudo systemctl try-restart fprintd.service
+fi
 
 echo ""
 echo "=== Installation complete ==="

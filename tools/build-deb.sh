@@ -17,10 +17,14 @@ test -f "$DEB_LIBRARY"
 DEB_STAGE=$(mktemp -d)
 trap 'rm -rf "$DEB_STAGE"' EXIT
 DEB_ROOT="$DEB_STAGE/debian/goodix-gf32xx-driver"
+DEB_SOURCE_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$DEB_ROOT/usr/lib/$DEB_MULTIARCH" "$DEB_ROOT/DEBIAN" "$DEB_STAGE/debian" "$DEB_OUTPUT"
 # Runtime overlay only: do not take ownership of distribution headers or GIRs.
 install -m 755 "$DEB_LIBRARY" "$DEB_ROOT/usr/lib/$DEB_MULTIARCH/libfprint-2.so.2.0.0"
 ln -s libfprint-2.so.2.0.0 "$DEB_ROOT/usr/lib/$DEB_MULTIARCH/libfprint-2.so.2"
+mkdir -p "$DEB_ROOT/usr/share/doc/goodix-gf32xx-driver"
+install -m 644 "$DEB_SOURCE_ROOT/libfprint/COPYING" "$DEB_ROOT/usr/share/doc/goodix-gf32xx-driver/copyright"
+install -m 644 "$DEB_SOURCE_ROOT/libfprint/AUTHORS" "$DEB_ROOT/usr/share/doc/goodix-gf32xx-driver/AUTHORS"
 cat > "$DEB_STAGE/debian/control" <<EOF
 Source: goodix-gf32xx-driver
 Maintainer: Goodix Fingerprint Linux Community
@@ -49,6 +53,9 @@ cat > "$DEB_ROOT/DEBIAN/postinst" <<'EOF'
 set -e
 if [ "$1" = configure ]; then
     ldconfig
+    if command -v deb-systemd-invoke >/dev/null 2>&1; then
+        deb-systemd-invoke try-restart fprintd.service || true
+    fi
 fi
 EOF
 cat > "$DEB_ROOT/DEBIAN/postrm" <<'EOF'
