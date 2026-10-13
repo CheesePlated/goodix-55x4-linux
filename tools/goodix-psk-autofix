@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Auto-fix PSK on Goodix fingerprint sensor after Windows dual-boot."""
+"""Optional boot-time PSK repair for Goodix 55a4/55b4 sensors."""
 
-import usb, struct, time
+import struct
+import sys
+import time
+
+import usb.core
+import usb.util
 
 PMK_HASH = bytes.fromhex(
     "81b8ff490612022a121a9449ee3aad2792f32b9f3141182cd01019945ee50361")
@@ -9,114 +14,153 @@ PSK_WHITE_BOX = bytes.fromhex(
     "ec35ae3abb45ed3f12c4751f1e5c2cc05b3c5452e9104d9f2a3118644f37a04b"
     "6fd66b1d97cf80f1345f76c84f03ff30bb51bf308f2a9875c41e6592cd2a2f9e"
     "60809b17b5316037b69bb2fa5d4c8ac31edb3394046ec06bbdacc57da6a756c5")
-
 FLAGS_MSG = 0xa0
 CMD_ACK = 0xb0
 CMD_PSK_READ = 0xe4
 CMD_PSK_WRITE = 0xe0
 CMD_NOP = 0x00
+PSK_READ_FLAGS = 0xbb020007
+PSK_WRITE_FLAGS = 0xbb010003
 EP_OUT = 0x01
 EP_IN = 0x82
 
 
 def encode_pack(payload, flags=FLAGS_MSG):
-    data = struct.pack("<B", flags)
-    data += struct.pack("<H", len(payload))
-    data += struct.pack("<B", sum(data) & 0xff)
-    data += payload
-    return data
+    header = struct.pack('<BH', flags, len(payload))
+    return header + bytes([sum(header) & 0xff]) + payload
 
 
-def encode_proto(payload, cmd):
-    total_len = len(payload) + 1
-    data = struct.pack("<B", cmd)
-    data += struct.pack("<H", total_len)
-    data += payload
-    data += struct.pack("<B", (0xaa - sum(data)) & 0xff)
-    return data
+def encode_proto(payload, cmd, checksum=True):
+    data = struct.pack('<BH', cmd, len(payload) + 1) + payload
+    return data + bytes([(0xaa - sum(data)) & 0xff if checksum else 0x88])
 
 
 def find_device():
-    return usb.core.find(idVendor=0x27c6, idProduct=0x55a4)
+    return usb.core.find(idVendor=0x27c6,
+                         custom_match=lambda device: device.idProduct in (0x55a4, 0x55b4))
 
 
 def init_device(device):
     try:
         if device.is_kernel_driver_active(0):
             device.detach_kernel_driver(0)
-    except Exception:
+    except NotImplementedError:
         pass
     device.set_configuration()
+    usb.util.claim_interface(device, 0)
     time.sleep(0.1)
 
 
-def send_cmd(device, cmd, payload):
-    packet = encode_pack(encode_proto(payload, cmd))
-    # Pad to 64 bytes
-    if len(packet) % 64:
-        packet += b'\x00' * (64 - len(packet) % 64)
-    device.write(EP_OUT, packet, timeout=1000)
+def send_cmd(device, cmd, payload, checksum=True):
+    packet = encode_pack(encode_proto(payload, cmd, checksum))
+    packet += b'\x00' * (-len(packet) % 64)
+    written = device.write(EP_OUT, packet, timeout=1000)
+    if written != len(packet):
+        raise RuntimeError('Short USB write')
 
 
-def read_response(device):
-    data = bytes(device.read(EP_IN, 0x10000, timeout=2000))
-    # Skip pack header (flags + length + checksum = 4 bytes)
-    if len(data) < 8:
-        return None, None, None
-    proto = data[4:]
-    cmd = proto[0]
-    length = struct.unpack("<H", proto[1:3])[0]
-    payload = proto[3:2+length]
-    return cmd, payload, length - 1
+class Sensor:
+    def __init__(self, device):
+        self.device = device
+        self.buffer = bytearray()
+
+    def read_response(self, deadline):
+        while True:
+            self.buffer = self.buffer.lstrip(b'\x00')
+            if len(self.buffer) >= 4:
+                length = struct.unpack_from('<H', self.buffer, 1)[0]
+                if len(self.buffer) >= length + 4:
+                    flags = self.buffer[0]
+                    proto = bytes(self.buffer[4:length + 4])
+                    del self.buffer[:length + 4]
+                    if flags != FLAGS_MSG or len(proto) < 4:
+                        raise ValueError('Invalid Goodix response framing')
+                    size = struct.unpack_from('<H', proto, 1)[0]
+                    if size < 1 or len(proto) != size + 3:
+                        raise ValueError('Invalid Goodix response length')
+                    # Preserve driver compatibility: do not enforce sensor checksums.
+                    return proto[0], proto[3:-1]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Goodix response timed out')
+            self.buffer.extend(self.device.read(EP_IN, 0x10000,
+                                                timeout=max(1, int(remaining * 1000))))
+
+    def exchange(self, cmd, payload):
+        send_cmd(self.device, cmd, payload)
+        deadline = time.monotonic() + 2
+        acknowledged = False
+        for _ in range(16):
+            response, data = self.read_response(deadline)
+            if response == CMD_ACK:
+                if len(data) != 2:
+                    raise ValueError('Invalid ACK length')
+                if data[0] != cmd:
+                    continue
+                if not data[1] & 1:
+                    raise RuntimeError('Command rejected by sensor')
+                acknowledged = True
+            elif response == cmd:
+                if not acknowledged:
+                    raise RuntimeError('Response arrived without a valid ACK')
+                return data
+        raise RuntimeError('Too many unexpected Goodix responses')
 
 
-def check_psk(device):
-    send_cmd(device, CMD_PSK_READ, struct.pack("<I", 0xbb020007))
-    cmd, payload, _ = read_response(device)
-    if cmd != CMD_ACK:
-        return False
-    cmd, payload, _ = read_response(device)
-    if cmd != CMD_PSK_READ:
-        return False
-    return bytes(payload[2:34]) == PMK_HASH
+def check_psk(sensor):
+    payload = sensor.exchange(CMD_PSK_READ,
+                              struct.pack('<III', PSK_READ_FLAGS, 32, 0))
+    if len(payload) < 9 or payload[0] != 0:
+        raise RuntimeError('Failed to read PSK')
+    flags, length = struct.unpack_from('<II', payload, 1)
+    if flags != PSK_READ_FLAGS or length != 32 or len(payload) != 9 + length:
+        raise ValueError('Invalid PSK read payload')
+    return payload[9:] == PMK_HASH
 
 
-def write_psk(device):
+def write_psk(sensor):
     for attempt in range(3):
-        send_cmd(device, CMD_PSK_WRITE,
-                 struct.pack("<IH", 0xbb010003, len(PSK_WHITE_BOX)) + PSK_WHITE_BOX)
         try:
-            cmd, _, _ = read_response(device)
-            if cmd == CMD_ACK:
+            payload = sensor.exchange(CMD_PSK_WRITE,
+                struct.pack('<II', PSK_WRITE_FLAGS, len(PSK_WHITE_BOX)) + PSK_WHITE_BOX)
+            if not payload or payload[0] != 0:
+                raise RuntimeError('PSK write rejected by sensor')
+            time.sleep(0.1)
+            if check_psk(sensor):
                 return True
-        except Exception as e:
-            print(f"goodix-psk-autofix: PSK write attempt {attempt+1} failed: {e}",
-                  file=__import__('sys').stderr)
-        time.sleep(0.3)
+            raise RuntimeError('PSK read-back does not match')
+        except (usb.core.USBError, OSError, ValueError, RuntimeError) as error:
+            print(f'goodix-psk-autofix: attempt {attempt + 1} failed: {error}', file=sys.stderr)
+            time.sleep(0.3)
     return False
 
 
 def main():
-    device = find_device()
-    if device is None:
-        print("goodix-psk-autofix: device not found, skipping")
-        return
-
+    device = None
     try:
+        device = find_device()
+        if device is None:
+            print('goodix-psk-autofix: device not found, skipping')
+            return 0
         init_device(device)
-        send_cmd(device, CMD_NOP, b'\x00\x00')
-
-        if check_psk(device):
-            print("goodix-psk-autofix: PSK OK, nothing to do")
-        else:
-            print("goodix-psk-autofix: PSK mismatch, writing community key...")
-            if write_psk(device):
-                print("goodix-psk-autofix: PSK written successfully")
-            else:
-                print("goodix-psk-autofix: FAILED to write PSK", file=__import__('sys').stderr)
-    except Exception as e:
-        print(f"goodix-psk-autofix: error: {e}", file=__import__('sys').stderr)
+        send_cmd(device, CMD_NOP, b'\x00' * 4, checksum=False)
+        sensor = Sensor(device)
+        if check_psk(sensor):
+            print('goodix-psk-autofix: PSK OK, nothing to do')
+            return 0
+        print('goodix-psk-autofix: PSK mismatch, writing community key...')
+        if write_psk(sensor):
+            print('goodix-psk-autofix: PSK written and verified')
+            return 0
+        print('goodix-psk-autofix: FAILED to write PSK', file=sys.stderr)
+        return 1
+    except Exception as error:
+        print(f'goodix-psk-autofix: error: {error}', file=sys.stderr)
+        return 1
+    finally:
+        if device is not None:
+            usb.util.dispose_resources(device)
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

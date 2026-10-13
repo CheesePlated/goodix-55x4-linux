@@ -22,10 +22,10 @@ echo "[1/4] Installing dependencies..."
 if [ "$DISTRO" = "debian" ]; then
     sudo apt install -y meson ninja-build libfprint-2-dev libglib2.0-dev \
         libgusb-dev libnss3-dev libssl-dev libcairo2-dev gobject-introspection \
-        libgirepository1.0-dev libopencv-dev pkg-config
+        libgirepository1.0-dev libopencv-dev pkg-config python3-usb
 elif [ "$DISTRO" = "arch" ]; then
     sudo pacman -S --needed meson ninja libfprint glib2 libgusb nss openssl \
-        cairo gobject-introspection opencv pkgconf
+        cairo gobject-introspection opencv pkgconf python-pyusb
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,7 +34,11 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 # Build driver
 echo "[2/4] Building driver..."
 cd "$REPO_DIR/libfprint"
-meson setup builddir --prefix=/usr -Ddrivers=goodixtls55x4 -Dudev_rules=disabled -Ddoc=false
+MESON_RECONFIGURE=()
+if [ -f builddir/build.ninja ]; then
+    MESON_RECONFIGURE=(--reconfigure)
+fi
+meson setup "${MESON_RECONFIGURE[@]}" builddir --prefix=/usr -Ddrivers=goodixtls55x4 -Dudev_rules=disabled -Ddoc=false
 ninja -C builddir
 
 # Install driver
@@ -52,9 +56,13 @@ sudo udevadm trigger
 sudo install -m 755 "$SCRIPT_DIR/goodix-psk-autofix" /usr/local/bin/goodix-psk-autofix
 sudo install -m 644 "$SCRIPT_DIR/goodix-psk-autofix.service" /etc/systemd/system/goodix-psk-autofix.service
 sudo systemctl daemon-reload
-sudo systemctl enable goodix-psk-autofix.service
+if [ "${INSTALL_PSK_SERVICE:-0}" = 1 ]; then
+    sudo systemctl enable goodix-psk-autofix.service
+else
+    echo "PSK boot service not enabled; the driver provisions PSK on activation."
+fi
 
 echo ""
 echo "=== Installation complete ==="
 echo ""
-echo "Now run: fprintd-enroll right-index-finger"
+echo "Now run: fprintd-enroll -f right-index-finger"

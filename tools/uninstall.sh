@@ -3,6 +3,7 @@ set -e
 
 echo "=== Uninstalling Goodix GF32xx Fingerprint Driver ==="
 
+sudo systemctl disable --now goodix-psk-autofix.service 2>/dev/null || true
 sudo rm -f /etc/udev/rules.d/99-goodix-fp.rules
 sudo rm -f /usr/local/bin/goodix-psk-autofix
 sudo rm -f /etc/systemd/system/goodix-psk-autofix.service
