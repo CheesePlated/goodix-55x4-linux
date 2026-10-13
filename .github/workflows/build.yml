@@ -26,3 +26,8 @@ jobs:
           cd libfprint
           meson setup builddir -Ddrivers=goodixtls55x4 -Dudev_rules=disabled -Ddoc=false
           ninja -C builddir
+
+      - name: Test
+        run: |
+          meson test -C libfprint/builddir --suite unit-tests --print-errorlogs
+          python3 tools/test-psk-autofix.py

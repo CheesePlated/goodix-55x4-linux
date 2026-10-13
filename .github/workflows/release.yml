@@ -23,7 +23,7 @@ jobs:
             libfprint-2-dev libglib2.0-dev libgusb-dev \
             libnss3-dev libssl-dev libcairo2-dev \
             gobject-introspection libgirepository1.0-dev \
-            libopencv-dev gtk-doc-tools
+            libopencv-dev gtk-doc-tools dpkg-dev
 
       - name: Build
         run: |
@@ -31,34 +31,23 @@ jobs:
           meson setup builddir --prefix=/usr -Ddrivers=goodixtls55x4 -Dudev_rules=disabled -Ddoc=false
           ninja -C builddir
 
-      - name: Package .deb
+      - name: Test
         run: |
-          cd libfprint
-          DESTDIR=$(pwd)/debian-pkg
-          meson install -C builddir --destdir="$DESTDIR"
-          cd "$DESTDIR"
-          mkdir -p DEBIAN
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          cat > DEBIAN/control << EOF
-          Package: goodix-gf32xx-driver
-          Version: ${VERSION}
-          Architecture: amd64
-          Maintainer: Goodix Fingerprint Linux Community
-          Description: Goodix GF32xx fingerprint sensor driver for Linux (Ubuntu)
-           Modified goodixtls driver for GF3208/GF3268 (USB 27c6:55a4/55b4).
-           Built on Ubuntu 24.04. For Debian or other distros, use source build.
-          Replaces: libfprint-2-2
-          Provides: libfprint-2-2
-          EOF
-          dpkg-deb --build --root-owner-group . goodix-gf32xx-driver_${VERSION}_${{ matrix.distro }}_amd64.deb
-          sha256sum *.deb > SHA256SUMS
-          mv *.deb SHA256SUMS "$GITHUB_WORKSPACE/"
+          meson test -C libfprint/builddir --suite unit-tests --print-errorlogs
+          python3 tools/test-psk-autofix.py
+
+      - name: Package .deb
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: ./tools/build-deb.sh libfprint/builddir "$RELEASE_VERSION" "${{ matrix.distro }}" "$GITHUB_WORKSPACE"
 
       - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.distro }}
-          path: goodix-gf32xx-driver_*.deb
+          path: |
+            goodix-gf32xx-driver_*.deb
+            SHA256SUMS
+          if-no-files-found: error
 
   release:
     needs: build-deb
@@ -80,3 +69,4 @@ jobs:
             pkgs/SHA256SUMS
           draft: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
