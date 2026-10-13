@@ -78,8 +78,8 @@ These fixes are included in our codebase. Summary:
 | **OpenSSL PSK ciphers** | `goodixtls.c` | Cipher list changed from `"ALL"` to `"PSK:@SECLEVEL=0"`. Modern OpenSSL 3.x excludes PSK suites from `ALL` and rejects them at default security level. Scope limited to the in-process TLS-PSK socketpair to the sensor. |
 | **Payload size fixes** | `goodix.c` | `GoodixNone payload = {}` (undefined struct) replaced with explicit `guint8 payload[2] = {0, 0}` for firmware version, TLS connection, TLS established, and OTP read commands. |
 | **sigfm doctest** | `sigfm/meson.build` | `doctest` dependency marked `required: false`; test target gated on `doctest.found()`. |
-| **sigfm thresholds** | `sigfm.cpp` | Tightened matching: `min_match` 5→15, Lowe's ratio 0.75→0.70. Reduces false positives. |
-| **TLS warm session** | `goodix55x4.c` | Caches TLS session across verify retries (reverted in subsequent commit, available as reference). |
+| **sigfm thresholds** | `sigfm.cpp` | Inherited matching gates. Current values: `min_match=12`, Lowe's ratio `0.74`, verification threshold `48`, 24 enrollment samples. Sorting and numerical boundary fixes preserve these thresholds. |
+| **TLS warm session** | `goodix55x4.c` | Reuses TLS across retries; normal deactivation waits for scan completion, while failures invalidate the warm state. TLS teardown joins the worker thread and reads have bounded waits. |
 
 ### Our additions
 
@@ -92,11 +92,11 @@ These fixes are included in our codebase. Summary:
 
 ## Firmware
 
-The driver expects firmware in the `GF32xx_RTSEC_APP_*` family. Tested versions:
+The current driver accepts firmware beginning with `GF3268_RTSEC_APP_`. Tested versions:
 
 - `GF3268_RTSEC_APP_10041` — community firmware (confirmed working)
 - `GF3268_RTSEC_APP_10056` — jedbillyb tested (confirmed working)
-- `GF3208_RTSEC_APP_10062` — Windows-provisioned (should work with prefix match + PSK reprovision)
+- `GF3208_RTSEC_APP_10062` — original Windows firmware recorded during research; this prefix is not accepted by the current driver.
 
 Firmware flashing is handled by [goodix-fp-dump](https://github.com/mpi3d/goodix-fp-dump). Firmware images are in the [goodix-firmware](https://github.com/goodix-fp-linux-dev/goodix-firmware) repository.
 
@@ -113,12 +113,12 @@ Device Powers On
        │ YES                    │
        ▼                        ▼
 ┌─────────────┐         ┌───────────────┐
-│ Ready       │         │ PSK matches   │
-│ (no write)  │         │ now → Ready   │
+│ Ready       │         │ PSK write     │
+│ (no write)  │         │ accepted      │
 └─────────────┘         └───────────────┘
 ```
 
-- PSK is checked on every activation (probe + enroll/verify)
-- Write only occurs on mismatch (~500ms, USB command `0xe0`)
+- PSK is checked on cold activation; warm verification retries reuse TLS without re-reading it.
+- Write only occurs on mismatch (USB command `0xe0`). The driver checks the command result; the optional Python boot helper additionally reads back the hash.
 - Enrolled fingerprint templates are stored separately and unaffected
 - Works transparently across Windows/Linux dual boot

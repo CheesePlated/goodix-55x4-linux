@@ -9,14 +9,14 @@ sudo apt install -y meson ninja-build pkg-config \
   libfprint-2-dev libglib2.0-dev libgusb-dev \
   libnss3-dev libssl-dev libcairo2-dev \
   gobject-introspection libgirepository1.0-dev \
-  libopencv-dev gtk-doc-tools
+  libopencv-dev gtk-doc-tools python3-usb
 ```
 
 ### Arch Linux
 
 ```bash
 sudo pacman -S --needed meson ninja libfprint glib2 libgusb \
-  nss openssl cairo gobject-introspection opencv pkgconf gtk-doc
+  nss openssl cairo gobject-introspection opencv pkgconf gtk-doc python-pyusb
 ```
 
 ## Build
@@ -41,7 +41,7 @@ sudo ./tools/install.sh
 This installs:
 
 - udev rules (`/etc/udev/rules.d/99-goodix-fp.rules`) — USB device permissions
-- PSK auto-fix service (`/etc/systemd/system/goodix-psk-autofix.service`) — dual-boot PSK calibration
+- Optional PSK auto-fix service (`/etc/systemd/system/goodix-psk-autofix.service`) — installed but not enabled by default; use `sudo env INSTALL_PSK_SERVICE=1 ./tools/install.sh` to enable it
 
 ## Verify
 

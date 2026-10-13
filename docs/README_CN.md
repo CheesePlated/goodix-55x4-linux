@@ -33,7 +33,7 @@ Goodix 55x4 系列（GF3208/GF3268）指纹传感器 Linux 驱动。USB `27c6:55
 |--------|------|-----------|
 | `27c6:55a4` | GF3208 / GF3268 | Debian forky/sid, Lenovo ThinkBook 16 G4+ IAP |
 | `27c6:55b4` | GF3268 | Void Linux, Lenovo IdeaPad Flex 5 |
-| `27c6:5584` | GF3268 | 待确认 |
+| `27c6:5584` | GF3268 | 未启用，待验证 |
 
 ## 安装
 
@@ -42,14 +42,13 @@ Goodix 55x4 系列（GF3208/GF3268）指纹传感器 Linux 驱动。USB `27c6:55
 > **注意：** Release 产物由 GitHub Actions 自动构建，**未经 GPG 签名**。生产环境建议从源码编译。Release 页面提供 SHA256 校验和验证。
 
 ```bash
-wget https://github.com/GuNanOvO/goodix-55x4-linux/releases/latest/download/goodix-gf32xx-driver_0.1.0_ubuntu-24.04_amd64.deb
-wget https://github.com/GuNanOvO/goodix-55x4-linux/releases/latest/download/SHA256SUMS
+# 先从同一个 Release 下载 ubuntu-24.04 的 .deb 和 SHA256SUMS。
 sha256sum -c SHA256SUMS  # 校验完整性
 sudo dpkg -i goodix-gf32xx-driver_*.deb
 sudo apt install --fix-broken -y
 ```
 
-根据系统选择 `ubuntu-24.04` 或 `ubuntu-22.04`。
+从 [Releases](https://github.com/GuNanOvO/goodix-55x4-linux/releases) 下载。CI 当前仅构建 Ubuntu 24.04；Debian、Arch 等系统请从源码编译。.deb 只提供运行时库，不覆盖发行版的开发头文件和 GIR 文件。
 
 ### 从源码编译
 
@@ -59,7 +58,7 @@ cd goodix-55x4-linux
 sudo ./tools/install.sh
 ```
 
-安装脚本自动处理依赖、编译驱动、写入 udev 规则并启用 PSK 自动修复服务。详见 [BUILDING.md](BUILDING.md)。
+安装脚本自动处理依赖、编译驱动并写入 udev 规则。PSK 辅助服务会被安装，但默认不启用；驱动本身会在激活时配置 PSK。需要开机辅助服务时，可执行 `sudo env INSTALL_PSK_SERVICE=1 ./tools/install.sh`。详见 [BUILDING.md](BUILDING.md)。
 
 ### 一次性：刷固件
 
@@ -98,28 +97,27 @@ sudo pam-auth-update
 # 勾选 "Fingerprint authentication" → 确认
 ```
 
-## 安装内容
+## 源码安装脚本的安装内容
 
 | 路径 | 用途 |
 |------|------|
 | `/usr/lib/x86_64-linux-gnu/libfprint-2.so*` | 含 goodixtls55x4 驱动的 libfprint |
 | `/etc/udev/rules.d/99-goodix-fp.rules` | USB 设备权限（`0660 plugdev`） |
 | `/usr/local/bin/goodix-psk-autofix` | PSK 检测与自动修复脚本 |
-| `/etc/systemd/system/goodix-psk-autofix.service` | 在 fprintd 之前运行，校准 PSK |
+| `/etc/systemd/system/goodix-psk-autofix.service` | 可选服务，显式启用后在 fprintd 之前运行 |
 
 ## 双系统
 
 Windows/Linux 切换会导致 PSK 被重写。本驱动自动处理：
 
 ```
-启动 Linux
-  → goodix-psk-autofix.service 运行
-  → 读取传感器 PSK 哈希
-  → 不匹配？写入社区密钥（~500ms）
-  → fprintd 以有效 PSK 启动
+启动后第一次指纹激活
+  → 驱动读取传感器 PSK 哈希
+  → 不匹配？驱动写入社区密钥
+  → 建立 TLS 连接并采集指纹
 ```
 
-无需用户干预。Windows 侧正常使用——启动时会重新写入自己的 PSK。
+可选的开机辅助服务可以提前完成检查，并在写入后复核哈希。Windows 使用传感器时可能再次配置自己的 PSK。
 
 ## 问题排查
 
@@ -188,3 +186,7 @@ LGPL-2.1
 - [jedbillyb/libfprint](https://github.com/jedbillyb/libfprint/tree/goodix-55b4-fixes) — PSK 补给、OpenSSL 修复、固件匹配
 - [mpi3d/goodix-fp-dump](https://github.com/mpi3d/goodix-fp-dump) — 固件刷写与 PSK 配置工具
 - [goodix-fp-linux-dev](https://github.com/goodix-fp-linux-dev) — 社区固件维护
+
+KDE 锁屏使用独立的 `kde-fingerprint` PAM 配置。密码通道 `kde` 应与指纹通道分开，避免重复申请设备；修改 `common-auth` 不会自动改变独立指纹通道的重试次数。
+
+本驱动在电脑端用 SIGFM/OpenCV 匹配；模板由 fprintd 保存在 `/var/lib/fprint/`，并非由本驱动存入 MCU。

@@ -12,7 +12,7 @@ Built on the work of [TheWeirdDev/libfprint](https://github.com/TheWeirdDev/libf
 
 ## The Problem
 
-Goodix does not provide Linux drivers. Their sensors ship firmware configured for Windows-only use (Intel SGX-based PSK provisioning, Windows Biometric Driver Interface). As of 2026, **no upstream libfprint release supports the 55x4 family** — `27c6:55a4` is explicitly listed as "known but unsupported" in Debian/Ubuntu's packaged libfprint.
+Goodix does not provide Linux drivers. Their sensors ship firmware configured for Windows-only use (Intel SGX-based PSK provisioning, Windows Biometric Driver Interface). The distribution libfprint used during this adaptation did not support the 55x4 family; this repository supplies the experimental community driver.
 
 ## The Solution
 
@@ -21,11 +21,11 @@ This driver replaces the system libfprint with a patched build that:
 | Capability | Detail |
 |------------|--------|
 | **Hardware detection** | Recognizes sensors by USB ID (`27c6:55a4`, `27c6:55b4`) |
-| **Firmware acceptance** | Accepts any `GF32xx_RTSEC_APP_*` version (10041, 10056, 10062, …) |
+| **Firmware acceptance** | Accepts the `GF3268_RTSEC_APP_*` firmware family (10041, 10056, 10062, …) |
 | **PSK auto-provision** | Detects Windows-provisioned sensors and writes the community key on first use. No manual PSK step needed. |
 | **TLS cipher fix** | Works with OpenSSL 3.x (security level relaxation scoped to the sensor socketpair) |
 | **Dual-boot safe** | Optional systemd service auto-calibrates PSK when switching from Windows to Linux |
-| **Warm TLS sessions** | Reuses TLS session across verify retries for instant re-authentication |
+| **Warm TLS sessions** | Avoids repeated TLS handshakes across healthy verify retries |
 
 ## Supported Hardware
 
@@ -33,7 +33,7 @@ This driver replaces the system libfprint with a patched build that:
 |--------|-----------------|-----------|
 | `27c6:55a4` | GF3208 / GF3268, `GF3268_RTSEC_APP_10041` | Debian forky/sid, Lenovo ThinkBook 16 G4+ IAP |
 | `27c6:55b4` | GF3268, `GF3268_RTSEC_APP_10056` | Void Linux, Lenovo IdeaPad Flex 5 |
-| `27c6:5584` | GF3268 | Awaiting confirmation |
+| `27c6:5584` | GF3268 | Not enabled; awaiting confirmation |
 
 ## Install
 
@@ -42,14 +42,13 @@ This driver replaces the system libfprint with a patched build that:
 > **Note:** Release artifacts are automatically built by GitHub Actions and are **not GPG-signed**. For production or security-sensitive environments, consider building from source. SHA256 checksums are provided on the release page for verification.
 
 ```bash
-wget https://github.com/GuNanOvO/goodix-55x4-linux/releases/latest/download/goodix-gf32xx-driver_0.1.0_ubuntu-24.04_amd64.deb
-wget https://github.com/GuNanOvO/goodix-55x4-linux/releases/latest/download/SHA256SUMS
+# Download the ubuntu-24.04 .deb and SHA256SUMS from the same release first.
 sha256sum -c SHA256SUMS  # verify integrity
 sudo dpkg -i goodix-gf32xx-driver_*.deb
 sudo apt install --fix-broken -y   # pull missing deps if any
 ```
 
-Choose `ubuntu-24.04` or `ubuntu-22.04` depending on your base system.
+Download assets from [Releases](https://github.com/GuNanOvO/goodix-55x4-linux/releases). CI builds for Ubuntu 24.04 only. Use source builds on Debian, Arch, or other distributions. The .deb contains the runtime library; it does not replace distribution development headers or GIR files.
 
 ### From Source
 
@@ -59,7 +58,7 @@ cd goodix-55x4-linux
 sudo ./tools/install.sh
 ```
 
-The install script handles dependencies, builds the driver, installs udev rules, and enables the PSK auto-fix service.
+The install script handles dependencies, builds the driver, and installs udev rules. It also installs the optional PSK helper without enabling it. The driver already provisions PSK on activation. To opt into the boot helper, run `sudo env INSTALL_PSK_SERVICE=1 ./tools/install.sh`.
 
 See [BUILDING.md](docs/BUILDING.md) for manual steps and Arch Linux instructions.
 
@@ -100,28 +99,29 @@ sudo pam-auth-update
 # Check "Fingerprint authentication" → OK
 ```
 
-## What Gets Installed
+On KDE, the lock screen uses a separate `kde-fingerprint` PAM stack. Keep its `kde` password stack separate to avoid duplicate device claims. Settings in `common-auth` do not automatically control the dedicated fingerprint stack.
+
+## What the Source Installer Installs
 
 | File | Purpose |
 |------|---------|
 | `/usr/lib/x86_64-linux-gnu/libfprint-2.so*` | Patched libfprint with goodixtls55x4 driver |
-| `/etc/udev/rules.d/99-goodix-fp.rules` | USB device permissions (`0666` for `27c6:55a4`/`55b4`) |
+| `/etc/udev/rules.d/99-goodix-fp.rules` | USB device permissions (`0660`, group `plugdev`, for `27c6:55a4`/`55b4`) |
 | `/usr/local/bin/goodix-psk-autofix` | PSK detection and auto-repair script |
-| `/etc/systemd/system/goodix-psk-autofix.service` | Runs before `fprintd.service`, calibrates PSK on boot |
+| `/etc/systemd/system/goodix-psk-autofix.service` | Optional; runs before `fprintd.service` when explicitly enabled |
 
 ## Dual-Boot
 
 Switching between Windows and Linux rewrites the PSK. This driver handles it automatically:
 
 ```
-Boot Linux
-  → goodix-psk-autofix.service runs
-  → reads sensor PSK hash
-  → mismatch? writes community key (~500ms)
-  → fprintd starts with valid PSK
+First fingerprint activation after boot
+  → driver reads sensor PSK hash
+  → mismatch? driver writes the community key
+  → TLS connection and fingerprint capture start
 ```
 
-No user intervention. Windows continues to work normally — it reprovisions its own PSK when it boots.
+The optional boot helper performs this check earlier and verifies the written hash. Windows may provision its own PSK again when it uses the sensor.
 
 ## Troubleshooting
 
@@ -174,7 +174,7 @@ Full technical documentation in [TECHNICAL.md](docs/TECHNICAL.md).
 
 ## Security
 
-The community PSK is hardcoded and public. The TLS channel provides **transport encryption** (prevents passive USB bus eavesdropping) but does **not** authenticate the host. Fingerprint templates are stored at `/var/lib/fprint/` (0600) and on the sensor MCU (encrypted channel). The OpenSSL `@SECLEVEL=0` configuration is scoped to the in-process sensor socketpair and does not affect any other TLS usage on the system.
+The community PSK is hardcoded and public. The TLS channel encrypts transport using a public key; it is not a strong host authentication boundary. This driver matches fingerprints on the host using SIGFM/OpenCV. Templates are stored by fprintd at `/var/lib/fprint/` (0600), not managed as MCU templates by this driver. The OpenSSL `@SECLEVEL=0` configuration is scoped to the in-process sensor socketpair and does not affect any other TLS usage on the system.
 
 See [SECURITY.md](docs/SECURITY.md) for full details.
 

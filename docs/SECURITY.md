@@ -6,7 +6,7 @@ The driver uses a **hardcoded community PSK** (`PMK_HASH` / `PSK_WHITE_BOX`) to 
 
 ### Implications
 
-1. **This key is public.** Anyone who reads the driver source has access to it. The sensor's TLS channel is a **transport encryption** layer, not an authentication or access-control layer. It prevents passive eavesdropping on the USB bus but does not authenticate the host.
+1. **This key is public.** Anyone who reads the driver source has access to it. The sensor's TLS channel is a **transport encryption** layer, not an authentication or access-control layer. It does not establish a unique host identity, and a public PSK must not be treated as a strong protection boundary for biometric traffic.
 
 2. **Physical access.** An attacker with physical access to the USB bus could:
    - Read the community PSK from the open-source driver
@@ -21,16 +21,17 @@ The driver uses a **hardcoded community PSK** (`PMK_HASH` / `PSK_WHITE_BOX`) to 
 
 - Keep your system's USB ports physically secure
 - Use full-disk encryption to protect fingerprint templates at rest (`/var/lib/fprint/`)
-- The PSK is a transport key, not a storage key — fingerprint matching data is not exposed through it
+- Stored templates are protected by filesystem permissions and disk encryption, not by the transport PSK
 
 ## Fingerprint Templates
 
-Enrolled fingerprint data is stored:
+This is an image-based, host-matching driver. SIGFM/OpenCV extracts and matches
+features on the computer. fprintd stores the enrolled templates under
+`/var/lib/fprint/`, normally with owner read/write permissions (`0600`). This
+driver does not manage fingerprint templates stored on the sensor MCU.
 
-- **On Linux:** in `/var/lib/fprint/` (fprintd). These files are owner-read-only (`0600`).
-- **On the sensor MCU:** the community firmware stores up to 10 fingerprint templates. The driver communicates with the sensor to enroll, verify, and delete templates.
-
-Template storage on the MCU is managed through the same TLS-PSK encrypted channel. No plaintext fingerprint image is stored on disk — only derived feature vectors.
+Normal operation does not save raw image files. Separate debugging and firmware
+tools can have different storage behavior.
 
 ## OpenSSL TLS-PSK Context
 
@@ -46,7 +47,10 @@ fingerprint sensor ←──USB──→ goodixtls ←──socketpair──→ 
 
 ## udev Permissions
 
-The udev rule grants `0666` access to Goodix USB devices (`27c6:55a4`, `27c6:55b4`). This is necessary for fprintd (running as the user's session) to access the sensor. The alternative would require a system-level daemon with USB access delegation, which fprintd provides natively.
+The rule grants `0660` access to `27c6:55a4` and `27c6:55b4`, with group
+`plugdev`. Group membership grants raw USB access; it does not imply an active
+local desktop session. fprintd normally runs as a system daemon, and its D-Bus
+operations have separate authorization rules.
 
 ## Reporting
 
@@ -54,12 +58,16 @@ Security concerns should be reported via GitHub Issues on [GuNanOvO/goodix-55x4-
 
 ## Firmware Write Exposure
 
-The driver implements PSK write (`GOODIX_CMD_PRESET_PSK_WRITE`, `0xe0`) and firmware update commands (`GOODIX_CMD_WRITE_FIRMWARE`, `0xf0`; `GOODIX_CMD_MCU_ERASE_APP`, `0xa4`) for device provisioning. These are necessary for the driver's core functionality (auto-PSK provisioning, initial firmware setup).
+The C driver implements PSK provisioning (`0xe0`). Firmware erase and flashing
+are performed by the separate `goodix-fp-dump` project; this driver does not
+implement the firmware update commands listed in the historical RE notes.
 
-Risk mitigation: USB device access is restricted to `plugdev` group via udev rules (`MODE="0660", GROUP="plugdev"`), not world-writable. Only logged-in users with a physical session can interact with the device. Firmware flashing is further gated by the separate `goodix-fp-dump` tool which requires explicit user confirmation.
-
-A physically-present attacker with USB bus access could still modify the device firmware. This is an inherent risk of USB-connected peripherals and is not specific to this driver.
+Raw USB access can still permit a separate tool to modify the device. The udev
+rule restricts that access to root and `plugdev` members.
 
 ## PSK Race Condition
 
-PSK check-then-write is performed as sequential SSM states (`ACTIVATE_CHECK_PSK` → `ACTIVATE_WRITE_PSK`) without a device-level lock. A process with USB access could theoretically inject a PSK write between the check and the write (~milliseconds). Mitigation: USB device access requires `plugdev` group membership (C-1), and the write state re-verifies the PSK hash after writing. An attacker would need both group membership and precise timing during device activation.
+The driver checks PSK during cold activation and writes on mismatch. It checks
+the write response but does not read back the hash afterward. The optional
+Python boot helper additionally verifies the hash after writing. Neither path
+implements an atomic device-side check-and-write transaction.
