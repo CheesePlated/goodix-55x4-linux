@@ -238,6 +238,19 @@ unit_tests = [
     'fpi-assembling',
 ]
 
+if 'goodixtls55x4' in drivers
+    goodix_tls_tests = executable('test-goodix-tls',
+        ['test-goodix-tls.c', '../libfprint/drivers/goodixtls/goodixtls.c'],
+        include_directories: [root_inc, include_directories('../libfprint')],
+        dependencies: [glib_dep, gio_dep, gusb_dep, openssl_dep, threads_dep])
+    test('goodix-tls', goodix_tls_tests, suite: 'unit-tests')
+    goodix_deactivate_tests = executable('test-goodix-deactivate',
+        'test-goodix-deactivate.c',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers)
+    test('goodix-deactivate', goodix_deactivate_tests, suite: 'unit-tests', env: envs)
+endif
+
 if 'virtual_image' in drivers
     unit_tests += [
         'fp-context',

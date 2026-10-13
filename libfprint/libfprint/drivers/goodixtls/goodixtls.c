@@ -131,13 +131,16 @@ static void *
 goodix_tls_init_serve (void *me)
 {
   GoodixTlsServer *self = me;
+  // Teardown may close the peer while OpenSSL is writing a handshake alert.
+  sigset_t blocked;
+  sigemptyset(&blocked);
+  sigaddset(&blocked, SIGPIPE);
+  pthread_sigmask(SIG_BLOCK, &blocked, NULL);
 
-  // NOTE: SSL_accept() blocks indefinitely. The USB command pipeline has
-  // a per-command timeout (GOODIX_TIMEOUT) that bounds the overall handshake,
-  // but the accept itself has no wall-clock deadline. If the sensor never
-  // completes the TLS handshake, this thread will persist until device close.
+  // Socket timeouts bound a stalled handshake; teardown joins this thread.
   fp_dbg ("TLS server waiting to accept...");
   int retr = SSL_accept (self->ssl_layer);
+  self->connected = retr > 0;
 
   fp_dbg ("TLS server accept done");
   if (retr <= 0)
@@ -150,8 +153,17 @@ goodix_tls_init_serve (void *me)
 gboolean
 goodix_tls_server_deinit (GoodixTlsServer *self, GError **error)
 {
-  SSL_shutdown (self->ssl_layer);
+  if (self->sock_fd >= 0)
+    shutdown (self->sock_fd, SHUT_RDWR);
+  if (self->client_fd >= 0)
+    shutdown (self->client_fd, SHUT_RDWR);
+  if (self->thread_started)
+    {
+      pthread_join (self->serve_thread, NULL);
+      self->thread_started = FALSE;
+    }
   SSL_free (self->ssl_layer);
+  self->ssl_layer = NULL;
 
   if (self->sock_fd >= 0)
     close (self->sock_fd);
@@ -162,6 +174,7 @@ goodix_tls_server_deinit (GoodixTlsServer *self, GError **error)
   self->client_fd = -1;
 
   SSL_CTX_free (self->ssl_ctx);
+  self->ssl_ctx = NULL;
 
   return TRUE;
 }
@@ -170,10 +183,19 @@ gboolean
 goodix_tls_server_init (GoodixTlsServer *self, GError **error)
 {
   g_assert (self->connection_callback);
+  self->sock_fd = -1;
+  self->client_fd = -1;
+  self->thread_started = FALSE;
+  self->connected = FALSE;
   SSL_load_error_strings ();
   OpenSSL_add_ssl_algorithms ();
   SSL_library_init ();
   self->ssl_ctx = tls_server_create_ctx ();
+  if (!self->ssl_ctx)
+    {
+      *error = err_from_ssl ();
+      return FALSE;
+    }
   tls_server_config_ctx (self->ssl_ctx);
 
   int socks[2] = {0, 0};
@@ -185,21 +207,36 @@ goodix_tls_server_init (GoodixTlsServer *self, GError **error)
     }
   self->sock_fd = socks[0];
   self->client_fd = socks[1];
-
-  if (self->ssl_ctx == NULL)
+  // Bound blocking TLS reads so a stalled sensor cannot hang the PAM caller.
+  const struct timeval timeout = { .tv_sec = 3 };
+  for (int i = 0; i < 2; i++)
     {
-      fp_dbg ("Unable to create TLS server context\n");
-      *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Unable to "
-                                                                  "create TLS "
-                                                                  "server "
-                                                                  "context");
+      if (setsockopt (socks[i], SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout) ||
+          setsockopt (socks[i], SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Failed to set TLS socket timeout: %s", strerror (errno));
+          return FALSE;
+        }
+    }
+
+  self->ssl_layer = SSL_new (self->ssl_ctx);
+  if (!self->ssl_layer)
+    {
+      *error = err_from_ssl ();
       return FALSE;
     }
-  self->ssl_layer = SSL_new (self->ssl_ctx);
   tls_config_ssl (self->ssl_layer);
   SSL_set_fd (self->ssl_layer, self->sock_fd);
 
-  pthread_create (&self->serve_thread, 0, goodix_tls_init_serve, self);
+  int result = pthread_create (&self->serve_thread, 0, goodix_tls_init_serve, self);
+  if (result != 0)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Failed to start TLS thread: %s", strerror (result));
+      return FALSE;
+    }
+  self->thread_started = TRUE;
 
   return TRUE;
 }

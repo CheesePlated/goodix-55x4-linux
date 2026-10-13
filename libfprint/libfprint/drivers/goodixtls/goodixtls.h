@@ -71,6 +71,8 @@ typedef struct _GoodixTlsServer
   // SSL* cli_ssl_layer;
   int       client_fd;
   pthread_t serve_thread;
+  gboolean thread_started;
+  gboolean connected;
 } GoodixTlsServer;
 
 // This is called only once to init the TLS server.

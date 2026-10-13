@@ -61,6 +61,8 @@ struct _FpiDeviceGoodixTls55X4 {
   guint8 *otp;
 
   GSList *frames;
+  FpiSsm *scan_ssm;
+  gboolean deactivating;
 
   Goodix55X4Pix empty_img[GOODIX55X4_FRAME_SIZE];
   // The background frame barely changes within an activation, so capture it
@@ -357,6 +359,7 @@ static void tls_activation_complete(FpDevice *dev, gpointer user_data,
                                     GError *error) {
   if (error) {
     fp_err("failed to complete tls activation: %s", error->message);
+    fpi_image_device_activate_complete(FP_IMAGE_DEVICE(dev), error);
     return;
   }
   FpImageDevice *image_dev = FP_IMAGE_DEVICE(dev);
@@ -557,6 +560,12 @@ static void scan_on_read_img(FpDevice *dev, guint8 *data, guint16 len,
     return;
   }
 
+  if (len < GOODIX55X4_RAW_FRAME_SIZE) {
+    fpi_ssm_mark_failed(ssm, fpi_device_error_new_msg(
+        FP_DEVICE_ERROR_PROTO, "Truncated fingerprint frame: %u bytes", len));
+    return;
+  }
+
   FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
   save_frame(self, data);
   if (g_slist_length(self->frames) <= GOODIX55X4_CAP_FRAMES) {
@@ -677,6 +686,11 @@ static void on_scan_empty_img(FpDevice *dev, guint8 *data, guint16 length,
     fpi_ssm_mark_failed(ssm, error);
     return;
   }
+  if (length < GOODIX55X4_RAW_FRAME_SIZE) {
+    fpi_ssm_mark_failed(ssm, fpi_device_error_new_msg(
+        FP_DEVICE_ERROR_PROTO, "Truncated background frame: %u bytes", length));
+    return;
+  }
   FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
   decode_frame(self->empty_img, data);
   self->empty_img_valid = TRUE;
@@ -778,6 +792,7 @@ static void scan_run_state(FpiSsm *ssm, FpDevice *dev) {
                                      check_none_cmd, ssm);
     break;
   case SCAN_STAGE_SWITCH_TO_FDT_DONE:
+    fpi_ssm_mark_completed(ssm);
     fpi_image_device_report_finger_status(img_dev, FALSE);
     break;
   }
@@ -818,19 +833,36 @@ static void write_sensor_complete(FpDevice *dev, gpointer user_data,
   scan_get_img(dev, user_data);
 }
 
+static void deactivate_idle_complete(FpDevice *dev, gpointer user_data,
+                                     GError *error);
+
 static void scan_complete(FpiSsm *ssm, FpDevice *dev, GError *error) {
+  FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
+  self->scan_ssm = NULL;
   if (error) {
+    g_slist_free_full(self->frames, g_free);
+    self->frames = g_slist_alloc();
+    if (self->deactivating) {
+      if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED) &&
+          fpi_device_action_is_cancelled(dev))
+        g_error_free(error); // dev_deactivate continues the explicit cancel path.
+      else
+        deactivate_idle_complete(dev, NULL, error);
+      return;
+    }
     fp_err("failed to scan: %s (code: %d)", error->message, error->code);
     // The warm session is the prime suspect for a scan failure: the sensor
     // re-enumerates onto a new USB address after idle and leaves this one bound
     // to a dead fd. Drop the warm state so the next activate goes cold and
     // re-handshakes. Without this the driver loops instant failures forever,
     // which is exactly why the original warm-session change was reverted.
-    FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
     self->active = FALSE;
     self->empty_img_valid = FALSE;
+    fpi_image_device_session_error(FP_IMAGE_DEVICE(dev), error);
     return;
   }
+  if (self->deactivating)
+    deactivate_idle_complete(dev, NULL, NULL);
   g_print("finished scan!");
   fp_dbg("finished scan");
 }
@@ -845,8 +877,9 @@ static void sleep_complete(FpiSsm *ssm, FpDevice *dev, GError *error) {
 }
 
 static void scan_start(FpiDeviceGoodixTls55X4 *dev) {
-  fpi_ssm_start(fpi_ssm_new(FP_DEVICE(dev), scan_run_state, SCAN_STAGE_NUM),
-                scan_complete);
+  g_assert(dev->scan_ssm == NULL);
+  dev->scan_ssm = fpi_ssm_new(FP_DEVICE(dev), scan_run_state, SCAN_STAGE_NUM);
+  fpi_ssm_start(dev->scan_ssm, scan_complete);
 }
 
 // Retained deliberately: dev_deactivate no longer sleeps the MCU (it keeps the
@@ -869,12 +902,8 @@ static void dev_init(FpImageDevice *img_dev) {
   FPI_DEVICE_GOODIXTLS55X4(dev)->active = FALSE;
   FPI_DEVICE_GOODIXTLS55X4(dev)->empty_img_valid = FALSE;
 
-  if (goodix_dev_init(dev, &error)) {
-    fpi_image_device_open_complete(img_dev, error);
-    return;
-  }
-
-  fpi_image_device_open_complete(img_dev, NULL);
+  goodix_dev_init(dev, &error);
+  fpi_image_device_open_complete(img_dev, error);
 }
 
 static void dev_deinit(FpImageDevice *img_dev) {
@@ -886,12 +915,8 @@ static void dev_deinit(FpImageDevice *img_dev) {
   FPI_DEVICE_GOODIXTLS55X4(dev)->active = FALSE;
   FPI_DEVICE_GOODIXTLS55X4(dev)->empty_img_valid = FALSE;
 
-  if (goodix_dev_deinit(dev, &error)) {
-    fpi_image_device_close_complete(img_dev, error);
-    return;
-  }
-
-  fpi_image_device_close_complete(img_dev, NULL);
+  goodix_dev_deinit(dev, &error);
+  fpi_image_device_close_complete(img_dev, error);
 }
 
 static void dev_activate(FpImageDevice *img_dev) {
@@ -910,6 +935,12 @@ static void dev_activate(FpImageDevice *img_dev) {
 
   // Cold path: recapture the background on the first scan of this activation.
   self->empty_img_valid = FALSE;
+  GError *error = NULL;
+  goodix_shutdown_tls(dev, &error);
+  if (error) {
+    fpi_image_device_activate_complete(img_dev, error);
+    return;
+  }
 
   fpi_ssm_start(fpi_ssm_new(dev, activate_run_state, ACTIVATE_NUM_STATES),
                 activate_complete);
@@ -929,13 +960,34 @@ static void dev_change_state(FpImageDevice *img_dev,
 }
 
 
+static void deactivate_idle_complete(FpDevice *dev, gpointer user_data,
+                                     GError *error) {
+  FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
+  if (error) {
+    self->active = FALSE;
+    self->empty_img_valid = FALSE;
+  }
+  self->deactivating = FALSE;
+  fpi_image_device_deactivate_complete(FP_IMAGE_DEVICE(dev), error);
+}
+
 static void dev_deactivate(FpImageDevice *img_dev) {
-  // Stay warm rather than sleeping the MCU and tearing down TLS. pam_fprintd
-  // deactivates between every verify retry, and doing the full sleep here (then
-  // redoing it all in activate) was the per-attempt cooldown. The real teardown
-  // happens on close, in dev_deinit. Complete at once so the next verify can
-  // start immediately.
-  fpi_image_device_deactivate_complete(img_dev, NULL);
+  FpDevice *dev = FP_DEVICE(img_dev);
+  FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
+  self->deactivating = TRUE;
+  // The last enrollment image can finish processing before FDT_MODE2 / FDT_UP.
+  // Let that scan drain its replies before completing a normal deactivation.
+  if (self->active && !fpi_device_action_is_cancelled(dev)) {
+    if (!self->scan_ssm)
+      deactivate_idle_complete(dev, NULL, NULL);
+    return;
+  }
+  if (self->scan_ssm) {
+    goodix_receive_done(dev, NULL, 0,
+        g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Scan cancelled"));
+  }
+  // Stop finger detection, while retaining TLS for the next verify attempt.
+  goodix_send_mcu_switch_to_idle_mode(dev, 20, deactivate_idle_complete, NULL);
 }
 
 // ---- DEV SECTION END ----
