@@ -249,6 +249,11 @@ if 'goodixtls55x4' in drivers
         dependencies: libfprint_private_dep,
         link_with: libfprint_drivers)
     test('goodix-deactivate', goodix_deactivate_tests, suite: 'unit-tests', env: envs)
+    goodix_packet_tests = executable('test-goodix-packets',
+        'test-goodix-packets.c',
+        dependencies: libfprint_private_dep,
+        link_with: libfprint_drivers)
+    test('goodix-packets', goodix_packet_tests, suite: 'unit-tests', env: envs)
 endif
 
 if 'virtual_image' in drivers

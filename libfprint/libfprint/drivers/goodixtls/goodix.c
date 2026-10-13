@@ -89,7 +89,10 @@ goodix_receive_done (FpDevice *dev, guint8 *data, guint16 length,
   gpointer user_data = priv->user_data;
 
   if (!(priv->ack || priv->reply))
-    return;
+    {
+      g_clear_error (&error);
+      return;
+    }
 
   goodix_reset_state (dev);
   if (!error)
@@ -97,6 +100,8 @@ goodix_receive_done (FpDevice *dev, guint8 *data, guint16 length,
 
   if (callback)
     callback (dev, data, length, user_data, error);
+  else
+    g_clear_error (&error);
 }
 
 void
@@ -385,15 +390,18 @@ goodix_receive_pack (FpDevice *dev, guint8 *data, guint32 length)
   FpiDeviceGoodixTlsPrivate *priv =
     fpi_device_goodixtls_get_instance_private (self);
   guint8 flags;
-  g_autofree guint8 *payload = NULL;
   guint16 payload_len;
   gboolean valid_checksum; // TODO implement checksum.
 
-  if (priv->length + length > GOODIX_MAX_PACKET_SIZE)
+  if (length > GOODIX_MAX_PACKET_SIZE ||
+      priv->length > GOODIX_MAX_PACKET_SIZE - length)
     {
       fp_err ("packet exceeds max size: %d + %d", priv->length, length);
       g_clear_pointer (&priv->data, g_free);
       priv->length = 0;
+      goodix_receive_done (dev, NULL, 0,
+        g_error_new_literal (G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "Goodix receive packet exceeds maximum size"));
       return;
     }
 
@@ -401,45 +409,64 @@ goodix_receive_pack (FpDevice *dev, guint8 *data, guint32 length)
   memcpy (priv->data + priv->length, data, length);
   priv->length += length;
 
-  if (!goodix_decode_pack (priv->data, priv->length, &flags, &payload,
-                           &payload_len, &valid_checksum))
+  while (priv->length)
     {
-      // Packet is not full, we still need data.
-      fp_dbg ("not full packet");
-      return;
-    }
-
-  switch (flags)
-    {
-    case GOODIX_FLAGS_MSG_PROTOCOL:
-      fp_dbg ("Got protocol msg");
-      goodix_receive_protocol (dev, payload, payload_len);
-      break;
-
-    case GOODIX_FLAGS_TLS:
-      fp_dbg ("Got TLS msg");
-      goodix_receive_done (dev, payload, payload_len, NULL);
-
-      // TLS message sending it to TLS server.
-      // TODO
-      break;
-
-    case GOODIX_FLAGS_TLS_DATA:
-        fp_dbg("Got TLS data msg");
-        if (priv->cmd != GOODIX_CMD_MCU_GET_IMAGE || !priv->reply)
-          break;
-        if (payload_len < 9)
-          {
-            fp_warn ("TLS_DATA payload too short: %d bytes (need >= 9)", payload_len);
+      g_autofree guint8 *payload = NULL;
+      // USB messages may be padded to 64 bytes. No supported pack flag is zero.
+      guint32 padding = 0;
+      while (padding < priv->length && priv->data[padding] == 0)
+        padding++;
+      if (padding)
+        {
+          priv->length -= padding;
+          memmove (priv->data, priv->data + padding, priv->length);
+          if (!priv->length)
             break;
-          }
-        // GOODIX 55x4: Remove first 9 to get valid TLS content
-        goodix_receive_done(dev, payload+9, payload_len-9, NULL);
-        break;
+        }
+      if (!goodix_decode_pack (priv->data, priv->length, &flags, &payload,
+                               &payload_len, &valid_checksum))
+        {
+          // Packet is not full, we still need data.
+          fp_dbg ("not full packet");
+          return;
+        }
 
-    default:
-      fp_warn ("Unknown flags: 0x%02x", flags);
-      break;
+      // Consume only this message, before callbacks can start the next command.
+      guint32 consumed = sizeof (GoodixPack) + 1 + payload_len;
+      priv->length -= consumed;
+      memmove (priv->data, priv->data + consumed, priv->length);
+      switch (flags)
+        {
+        case GOODIX_FLAGS_MSG_PROTOCOL:
+          fp_dbg ("Got protocol msg");
+          goodix_receive_protocol (dev, payload, payload_len);
+          break;
+
+        case GOODIX_FLAGS_TLS:
+          fp_dbg ("Got TLS msg");
+          goodix_receive_done (dev, payload, payload_len, NULL);
+
+          // TLS message sending it to TLS server.
+          // TODO
+          break;
+
+        case GOODIX_FLAGS_TLS_DATA:
+            fp_dbg("Got TLS data msg");
+            if (priv->cmd != GOODIX_CMD_MCU_GET_IMAGE || !priv->reply)
+              break;
+            if (payload_len < 9)
+              {
+                fp_warn ("TLS_DATA payload too short: %d bytes (need >= 9)", payload_len);
+                break;
+              }
+            // GOODIX 55x4: Remove first 9 to get valid TLS content
+            goodix_receive_done(dev, payload+9, payload_len-9, NULL);
+            break;
+
+        default:
+          fp_warn ("Unknown flags: 0x%02x", flags);
+          break;
+        }
     }
 
   g_clear_pointer (&priv->data, g_free);
