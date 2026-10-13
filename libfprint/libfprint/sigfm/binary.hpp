@@ -111,6 +111,9 @@ public:
                          bool> = true>
     constexpr stream& read(Iter&& begin, std::size_t dist)
     {
+        if (dist > store_.size()) {
+            throw std::runtime_error{"tried to extract from too small stream"};
+        }
         std::copy(store_.begin(), store_.begin() + dist, begin);
         store_.erase(store_.begin(), store_.begin() + dist);
         return *this;
@@ -142,9 +145,18 @@ struct deserializer<cv::Mat> : public std::true_type {
     {
         int rows, cols, type;
         in >> type >> rows >> cols;
+        if (rows < 0 || cols < 0 || type < 0 || (type & ~CV_MAT_TYPE_MASK)) {
+            throw std::runtime_error{"invalid matrix dimensions or type"};
+        }
+        const std::size_t element_size = CV_ELEM_SIZE(type);
+        if (rows && static_cast<std::size_t>(cols) > in.size() / element_size / rows) {
+            throw std::runtime_error{"truncated matrix data"};
+        }
+        const std::size_t bytes = static_cast<std::size_t>(rows) * cols * element_size;
         cv::Mat m;
         m.create(rows, cols, type);
-        in.read(m.data, std::distance(m.datastart, m.dataend));
+        if (bytes)
+            in.read(m.data, bytes);
         return m;
     }
 };
@@ -202,6 +214,9 @@ struct deserializer<std::vector<T>> : public std::true_type {
     {
         std::size_t size;
         in >> size;
+        if (size > in.size()) {
+            throw std::runtime_error{"invalid vector length"};
+        }
         std::vector<T> vs;
         vs.reserve(size);
         for (std::size_t n = 0; n != size; ++n) {

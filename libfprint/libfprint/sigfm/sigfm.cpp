@@ -63,6 +63,12 @@ constexpr auto distance_match = 0.74;
 constexpr auto length_match = 0.05;
 constexpr auto angle_match = 0.05;
 constexpr auto min_match = 12;
+bool angles_match(double first, double second)
+{
+    // Equal zero angles and floating-point noise must not produce 0/0.
+    return std::abs(first - second) <= 1e-7 ||
+           1 - std::min(first, second) / std::max(first, second) <= angle_match;
+}
 struct match {
     cv::Point2i p1;
     cv::Point2i p2;
@@ -74,8 +80,8 @@ struct match {
     }
     bool operator<(const match& right) const
     {
-        return (this->p1.y < right.p1.y) ||
-               ((this->p1.y < right.p1.y) && this->p1.x < right.p1.x);
+        return std::tie(p1.y, p1.x, p2.y, p2.x) <
+               std::tie(right.p1.y, right.p1.x, right.p2.y, right.p2.x);
     }
 };
 struct angle {
@@ -102,6 +108,8 @@ unsigned char* sigfm_serialize_binary(SigfmImgInfo* info, int* outlen)
 
 SigfmImgInfo* sigfm_deserialize_binary(const unsigned char* bytes, int len)
 {
+    if (!bytes || len < 0)
+        return nullptr;
     try {
         bin::stream s{bytes, bytes + len};
         auto info = std::make_unique<SigfmImgInfo>();
@@ -173,12 +181,14 @@ int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
                     length_match) {
 
                     double product = length_1 * length_2;
+                    if (product == 0)
+                        continue;
                     angles.emplace_back(angle(
                         M_PI / 2 +
-                            asin((vec_1[0] * vec_2[0] + vec_1[1] * vec_2[1]) /
-                                 product),
-                        acos((vec_1[0] * vec_2[1] - vec_1[1] * vec_2[0]) /
-                             product),
+                            asin(std::clamp((vec_1[0] * vec_2[0] + vec_1[1] * vec_2[1]) /
+                                            product, -1.0, 1.0)),
+                        acos(std::clamp((vec_1[0] * vec_2[1] - vec_1[1] * vec_2[0]) /
+                                        product, -1.0, 1.0)),
                         match_1, match_2));
                 }
             }
@@ -194,12 +204,8 @@ int sigfm_match_score(SigfmImgInfo* frame, SigfmImgInfo* enrolled)
             for (std::size_t k = j + 1; k < angles.size(); k++) {
                 angle angle_2 = angles[k];
 
-                if (1 - std::min(angle_1.sin, angle_2.sin) /
-                                std::max(angle_1.sin, angle_2.sin) <=
-                        angle_match &&
-                    1 - std::min(angle_1.cos, angle_2.cos) /
-                                std::max(angle_1.cos, angle_2.cos) <=
-                        angle_match) {
+                if (angles_match(angle_1.sin, angle_2.sin) &&
+                    angles_match(angle_1.cos, angle_2.cos)) {
 
                     count += 1;
                 }

@@ -9,6 +9,10 @@ libsigfm = static_library('sigfm',
         dependencies: [opencv],
 )
 
+sigfm_match_tests = executable('sigfm-match-tests', 'test-match.cpp',
+        dependencies: [glib_dep, opencv], link_with: libsigfm)
+test('sigfm-match', sigfm_match_tests, suite: 'unit-tests')
+
 # doctest ships header-only with no pkg-config file on some distros; only build
 # the unit tests when it is actually available so the library still configures.
 if doctest.found()
