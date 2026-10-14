@@ -29,12 +29,15 @@
  * @FPI_IMAGE_DEVICE_STATE_ACTIVATING: State during activate callback
  * @FPI_IMAGE_DEVICE_STATE_IDLE: Activated but idle
  * @FPI_IMAGE_DEVICE_STATE_DEACTIVATING: State during deactivate callback
- * @FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON: waiting for the finger to be pressed or swiped
+ * @FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON: waiting for the finger to be pressed
+ * or swiped
  * @FPI_IMAGE_DEVICE_STATE_CAPTURE: capturing an image
- * @FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF: waiting for the finger to be removed
+ * @FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF: waiting for the finger to be
+ * removed
  *
  * The state of an imaging device while doing a capture. The state is
- * passed through to the driver using the ::activate() or ::change_state() vfuncs.
+ * passed through to the driver using the ::activate() or ::change_state()
+ * vfuncs.
  *
  * The driver needs to call fpi_image_device_report_finger_status() to move
  * between the different states. Note that the capture state might be entered
@@ -106,41 +109,32 @@ typedef enum {
  * This API is solely intended for drivers. It is purely internal and neither
  * API nor ABI stable.
  */
-struct _FpImageDeviceClass
-{
-  FpDeviceClass           parent_class;
+struct _FpImageDeviceClass {
+  FpDeviceClass parent_class;
 
-  gint                    bz3_threshold;
-  gint                    img_width;
-  gint                    img_height;
+  gint bz3_threshold;
+  gint img_width;
+  gint img_height;
   FpiImageDeviceAlgorithm algorithm;
 
-  void                    (*img_open)     (FpImageDevice *dev);
-  void                    (*img_close)    (FpImageDevice *dev);
-  void                    (*activate)     (FpImageDevice *dev);
-  void                    (*change_state) (FpImageDevice      *dev,
-                                           FpiImageDeviceState state);
-  void                    (*deactivate)   (FpImageDevice *dev);
+  void (*img_open)(FpImageDevice *dev);
+  void (*img_close)(FpImageDevice *dev);
+  void (*activate)(FpImageDevice *dev);
+  void (*change_state)(FpImageDevice *dev, FpiImageDeviceState state);
+  void (*deactivate)(FpImageDevice *dev);
 };
 
-void fpi_image_device_set_bz3_threshold (FpImageDevice *self,
-                                         gint           bz3_threshold);
+void fpi_image_device_set_bz3_threshold(FpImageDevice *self,
+                                        gint bz3_threshold);
 
-void fpi_image_device_session_error (FpImageDevice *self,
-                                     GError        *error);
+void fpi_image_device_session_error(FpImageDevice *self, GError *error);
 
-void fpi_image_device_open_complete (FpImageDevice *self,
-                                     GError        *error);
-void fpi_image_device_close_complete (FpImageDevice *self,
-                                      GError        *error);
-void fpi_image_device_activate_complete (FpImageDevice *self,
-                                         GError        *error);
-void fpi_image_device_deactivate_complete (FpImageDevice *self,
-                                           GError        *error);
+void fpi_image_device_open_complete(FpImageDevice *self, GError *error);
+void fpi_image_device_close_complete(FpImageDevice *self, GError *error);
+void fpi_image_device_activate_complete(FpImageDevice *self, GError *error);
+void fpi_image_device_deactivate_complete(FpImageDevice *self, GError *error);
 
-void fpi_image_device_report_finger_status (FpImageDevice *self,
-                                            gboolean       present);
-void fpi_image_device_image_captured (FpImageDevice *self,
-                                      FpImage       *image);
-void fpi_image_device_retry_scan (FpImageDevice *self,
-                                  FpDeviceRetry  retry);
+void fpi_image_device_report_finger_status(FpImageDevice *self,
+                                           gboolean present);
+void fpi_image_device_image_captured(FpImageDevice *self, FpImage *image);
+void fpi_image_device_retry_scan(FpImageDevice *self, FpDeviceRetry retry);

@@ -29,12 +29,14 @@
  * @FPI_IMAGE_V_FLIPPED: the image is vertically flipped
  * @FPI_IMAGE_H_FLIPPED: the image is horizontally flipped
  * @FPI_IMAGE_COLORS_INVERTED: the colours are inverted
+ * @FPI_IMAGE_PARTIAL: the image is a partial scan
  *
  * Flags used in an #FpImage structure to describe the contained image.
  * This is useful for image drivers as they can simply set these flags and
  * rely on the image to be normalized by libfprint before further processing.
  */
 typedef enum {
+  FPI_IMAGE_NONE            = 0,
   FPI_IMAGE_V_FLIPPED       = 1 << 0,
   FPI_IMAGE_H_FLIPPED       = 1 << 1,
   FPI_IMAGE_COLORS_INVERTED = 1 << 2,
@@ -65,12 +67,12 @@ struct _FpImage
   FpiImageFlags flags;
 
   /*< private >*/
-  guint8      *data;
-  guint8      *binarized;
+  guint8    *data;
+  guint8    *binarized;
 
-  GPtrArray   *minutiae;
-  SigfmImgInfo * sigfm_info;
-  guint        ref_count;
+  GPtrArray *minutiae;
+  SigfmImgInfo *sigfm_info;
+  gboolean   detection_in_progress;
 };
 
 gint fpi_std_sq_dev (const guint8 *buf,

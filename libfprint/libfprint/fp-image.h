@@ -25,43 +25,34 @@
 
 G_BEGIN_DECLS
 
-#define FP_TYPE_IMAGE (fp_image_get_type ())
+#define FP_TYPE_IMAGE (fp_image_get_type())
 
 typedef struct fp_minutia FpMinutia;
 
-G_DECLARE_FINAL_TYPE (FpImage, fp_image, FP, IMAGE, GObject)
+G_DECLARE_FINAL_TYPE(FpImage, fp_image, FP, IMAGE, GObject)
 
-FpImage     *fp_image_new (gint width,
-                           gint height);
+FpImage *fp_image_new(gint width, gint height);
 
-guint         fp_image_get_width (FpImage *self);
-guint         fp_image_get_height (FpImage *self);
-gdouble       fp_image_get_ppmm (FpImage *self);
+guint fp_image_get_width(FpImage *self);
+guint fp_image_get_height(FpImage *self);
+gdouble fp_image_get_ppmm(FpImage *self);
 
-GPtrArray *   fp_image_get_minutiae (FpImage *self);
+GPtrArray *fp_image_get_minutiae(FpImage *self);
 
-void          fp_image_detect_minutiae (FpImage            *self,
-                                        GCancellable       *cancellable,
-                                        GAsyncReadyCallback callback,
-                                        gpointer            user_data);
+void fp_image_detect_minutiae(FpImage *self, GCancellable *cancellable,
+                              GAsyncReadyCallback callback, gpointer user_data);
 
-void fp_image_extract_sigfm_info (FpImage           * self,
-                                GCancellable      * cancellable,
-                                GAsyncReadyCallback callback,
-                                gpointer            user_data);
-gboolean      fp_image_detect_minutiae_finish (FpImage      *self,
-                                               GAsyncResult *result,
-                                               GError      **error);
+void fp_image_extract_sigfm_info(FpImage *self, GCancellable *cancellable,
+                                 GAsyncReadyCallback callback,
+                                 gpointer user_data);
+gboolean fp_image_detect_minutiae_finish(FpImage *self, GAsyncResult *result,
+                                         GError **error);
 
-const guchar * fp_image_get_data (FpImage *self,
-                                  gsize   *len);
-const guchar * fp_image_get_binarized (FpImage *self,
-                                       gsize   *len);
+const guchar *fp_image_get_data(FpImage *self, gsize *len);
+const guchar *fp_image_get_binarized(FpImage *self, gsize *len);
 
-void           fp_minutia_get_coords (FpMinutia *min,
-                                      gint      *x,
-                                      gint      *y);
+void fp_minutia_get_coords(FpMinutia *min, gint *x, gint *y);
 
-SigfmImgInfo * fp_image_get_sigfm_info (FpImage * self);
+SigfmImgInfo *fp_image_get_sigfm_info(FpImage *self);
 
 G_END_DECLS

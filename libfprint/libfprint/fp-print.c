@@ -597,6 +597,9 @@ fp_print_equal (FpPrint *self, FpPrint *other)
   g_return_val_if_fail (self->type != FPI_PRINT_UNDEFINED, FALSE);
   g_return_val_if_fail (other->type != FPI_PRINT_UNDEFINED, FALSE);
 
+  if (self == other)
+    return TRUE;
+
   if (self->type != other->type)
     return FALSE;
 
@@ -606,18 +609,16 @@ fp_print_equal (FpPrint *self, FpPrint *other)
   if (g_strcmp0 (self->device_id, other->device_id))
     return FALSE;
 
-  if (self->type == FPI_PRINT_RAW)
+  switch (self->type)
     {
+    case FPI_PRINT_RAW:
       return g_variant_equal (self->data, other->data);
-    }
-  else if (self->type == FPI_PRINT_NBIS)
-    {
-      guint i;
 
+    case FPI_PRINT_NBIS:
       if (self->prints->len != other->prints->len)
         return FALSE;
 
-      for (i = 0; i < self->prints->len; i++)
+      for (guint i = 0; i < self->prints->len; i++)
         {
           struct xyt_struct *a = g_ptr_array_index (self->prints, i);
           struct xyt_struct *b = g_ptr_array_index (other->prints, i);
@@ -627,11 +628,12 @@ fp_print_equal (FpPrint *self, FpPrint *other)
         }
 
       return TRUE;
-    }
-  else
-    {
+
+    case FPI_PRINT_UNDEFINED:
       g_assert_not_reached ();
     }
+
+  g_return_val_if_reached (FALSE);
 }
 
 #define FPI_PRINT_VARIANT_TYPE G_VARIANT_TYPE ("(issbymsmsia{sv}v)")
@@ -744,13 +746,12 @@ fp_print_serialize (FpPrint *print,
 
   result = g_variant_builder_end (&builder);
 
-  if (G_BYTE_ORDER == G_BIG_ENDIAN)
-    {
-      GVariant *tmp;
-      tmp = g_variant_byteswap (result);
-      g_variant_unref (result);
-      result = tmp;
-    }
+#if (G_BYTE_ORDER == G_BIG_ENDIAN)
+  GVariant *tmp;
+  tmp = g_variant_byteswap (result);
+  g_variant_unref (result);
+  result = tmp;
+#endif
 
   len = g_variant_get_size (result);
   /* Add 3 bytes of header */
@@ -790,7 +791,7 @@ fp_print_deserialize (const guchar *data,
   g_autoptr(GVariant) value = NULL;
   g_autoptr(GVariant) print_data = NULL;
   g_autoptr(GDate) date = NULL;
-  guchar *aligned_data = NULL;
+  g_autoptr(GBytes) bytes = NULL;
   guint8 finger_int8;
   FpFinger finger;
   g_autofree gchar *username = NULL;
@@ -812,22 +813,19 @@ fp_print_deserialize (const guchar *data,
    * of this function (meaning we don't need to keep the data around.
    */
 
-  /* To support GLIB < 2.60 we need to make sure that the memory is aligned correctly.
-   * We also need to copy the backing store for the raw data that we may keep for
-   * longer. */
-  aligned_data = g_malloc (length - 3);
-  memcpy (aligned_data, data + 3, length - 3);
-  raw_value = g_variant_new_from_data (FPI_PRINT_VARIANT_TYPE,
-                                       aligned_data, length - 3,
-                                       FALSE, g_free, aligned_data);
+  /* We need to copy the backing store for the raw data that we may keep for
+   * longer. Using a GBytes also ensures the data is correctly aligned. */
+  bytes = g_bytes_new (data + 3, length - 3);
+  raw_value = g_variant_new_from_bytes (FPI_PRINT_VARIANT_TYPE, bytes, FALSE);
 
   if (!raw_value)
     goto invalid_format;
 
-  if (G_BYTE_ORDER == G_BIG_ENDIAN)
-    value = g_variant_byteswap (raw_value);
-  else
-    value = g_variant_get_normal_form (raw_value);
+#if (G_BYTE_ORDER == G_BIG_ENDIAN)
+  value = g_variant_byteswap (raw_value);
+#else
+  value = g_variant_get_normal_form (raw_value);
+#endif
 
   g_variant_get (value,
                  "(i&s&sbymsmsi@a{sv}v)",
@@ -845,101 +843,81 @@ fp_print_deserialize (const guchar *data,
   finger = finger_int8;
 
   /* Assume data is valid at this point if the values are somewhat sane. */
-  if (type == FPI_PRINT_NBIS)
+  switch (type)
     {
-      g_autoptr(GVariant) prints = g_variant_get_child_value (print_data, 0);
-      guint i;
+    case FPI_PRINT_NBIS:
+      {
+        g_autoptr(GVariant) prints = g_variant_get_child_value (print_data, 0);
+        guint i;
 
-      result = g_object_new (FP_TYPE_PRINT,
-                             "driver", driver,
-                             "device-id", device_id,
-                             "device-stored", device_stored,
-                             NULL);
-      g_object_ref_sink (result);
-      fpi_print_set_type (result, FPI_PRINT_NBIS);
-      for (i = 0; i < g_variant_n_children (prints); i++)
-        {
-          g_autofree struct xyt_struct *xyt = NULL;
-          const gint32 *xcol, *ycol, *thetacol;
-          gsize xlen, ylen, thetalen;
-          g_autoptr(GVariant) xyt_data = NULL;
-          GVariant *child;
+        result = g_object_new (FP_TYPE_PRINT,
+                               "driver", driver,
+                               "device-id", device_id,
+                               "device-stored", device_stored,
+                               NULL);
+        g_object_ref_sink (result);
+        fpi_print_set_type (result, FPI_PRINT_NBIS);
+        for (i = 0; i < g_variant_n_children (prints); i++)
+          {
+            g_autofree struct xyt_struct *xyt = NULL;
+            const gint32 *xcol, *ycol, *thetacol;
+            gsize xlen, ylen, thetalen;
+            g_autoptr(GVariant) xyt_data = NULL;
+            GVariant *child;
 
-          xyt_data = g_variant_get_child_value (prints, i);
+            xyt_data = g_variant_get_child_value (prints, i);
 
-          child = g_variant_get_child_value (xyt_data, 0);
-          xcol = g_variant_get_fixed_array (child, &xlen, sizeof (gint32));
-          g_variant_unref (child);
+            child = g_variant_get_child_value (xyt_data, 0);
+            xcol = g_variant_get_fixed_array (child, &xlen, sizeof (gint32));
+            g_variant_unref (child);
 
-          child = g_variant_get_child_value (xyt_data, 1);
-          ycol = g_variant_get_fixed_array (child, &ylen, sizeof (gint32));
-          g_variant_unref (child);
+            child = g_variant_get_child_value (xyt_data, 1);
+            ycol = g_variant_get_fixed_array (child, &ylen, sizeof (gint32));
+            g_variant_unref (child);
 
-          child = g_variant_get_child_value (xyt_data, 2);
-          thetacol = g_variant_get_fixed_array (child, &thetalen, sizeof (gint32));
-          g_variant_unref (child);
+            child = g_variant_get_child_value (xyt_data, 2);
+            thetacol = g_variant_get_fixed_array (child, &thetalen, sizeof (gint32));
+            g_variant_unref (child);
 
-          if (xlen != ylen || xlen != thetalen)
-            goto invalid_format;
+            if (xlen != ylen || xlen != thetalen)
+              goto invalid_format;
 
-          if (xlen > G_N_ELEMENTS (xyt->xcol))
-            goto invalid_format;
+            if (xlen > G_N_ELEMENTS (xyt->xcol))
+              goto invalid_format;
 
-          xyt = g_new0 (struct xyt_struct, 1);
-          xyt->nrows = xlen;
-          memcpy (xyt->xcol, xcol, sizeof (xcol[0]) * xlen);
-          memcpy (xyt->ycol, ycol, sizeof (xcol[0]) * xlen);
-          memcpy (xyt->thetacol, thetacol, sizeof (xcol[0]) * xlen);
+            xyt = g_new0 (struct xyt_struct, 1);
+            xyt->nrows = xlen;
+            memcpy (xyt->xcol, xcol, sizeof (xcol[0]) * xlen);
+            memcpy (xyt->ycol, ycol, sizeof (xcol[0]) * xlen);
+            memcpy (xyt->thetacol, thetacol, sizeof (xcol[0]) * xlen);
 
-          g_ptr_array_add (result->prints, g_steal_pointer (&xyt));
-        }
-    }
-  else if (type == FPI_PRINT_SIGFM)
-    {
-      g_autoptr(GVariant) prints = g_variant_get_child_value (print_data, 0);
-      guint i;
+            g_ptr_array_add (result->prints, g_steal_pointer (&xyt));
+          }
+      }
+      break;
 
-      result = g_object_new (FP_TYPE_PRINT, "driver", driver, "device-id",
-                             device_id, "device-stored", device_stored, NULL);
-      g_object_ref_sink (result);
-      fpi_print_set_type (result, FPI_PRINT_SIGFM);
+    case FPI_PRINT_RAW:
+      {
+        g_autoptr(GVariant) fp_data = g_variant_get_child_value (print_data, 0);
 
-      for (i = 0; i < g_variant_n_children (prints); i++)
-        {
-          g_autoptr(GVariant) sigfm_data = NULL;
+        result = g_object_new (FP_TYPE_PRINT,
+                               "fpi-type", type,
+                               "driver", driver,
+                               "device-id", device_id,
+                               "device-stored", device_stored,
+                               "fpi-data", fp_data,
+                               NULL);
+        g_object_ref_sink (result);
+      }
+      break;
 
-          sigfm_data = g_variant_get_child_value (prints, i);
+    case FPI_PRINT_UNDEFINED:
+      {
+        g_autofree char *type_str = g_enum_to_string (fpi_print_type_get_type (), type);
+        g_warning ("Invalid print type: 0x%X (%s)", type, type_str);
 
-          GVariant * child = g_variant_get_child_value (sigfm_data, 0);
-          gsize slen;
-          const unsigned char * serialized =
-            g_variant_get_fixed_array (child, &slen, sizeof (unsigned char));
-          g_variant_unref (child);
-
-          SigfmImgInfo * sigfm_info = sigfm_deserialize_binary (serialized, slen);
-          if (!sigfm_info)
-            goto invalid_format;
-
-          g_ptr_array_add (result->prints, g_steal_pointer (&sigfm_info));
-        }
-    }
-  else if (type == FPI_PRINT_RAW)
-    {
-      g_autoptr(GVariant) fp_data = g_variant_get_child_value (print_data, 0);
-
-      result = g_object_new (FP_TYPE_PRINT,
-                             "fpi-type", type,
-                             "driver", driver,
-                             "device-id", device_id,
-                             "device-stored", device_stored,
-                             "fpi-data", fp_data,
-                             NULL);
-      g_object_ref_sink (result);
-    }
-  else
-    {
-      g_warning ("Invalid print type: 0x%X", type);
-      goto invalid_format;
+        goto invalid_format;
+      }
     }
 
   date = g_date_new_julian (julian_date);

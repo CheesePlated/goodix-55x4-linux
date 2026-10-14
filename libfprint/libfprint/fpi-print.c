@@ -19,6 +19,7 @@
  */
 
 #include "fpi-print.h"
+#include "fp-image.h"
 #include "sigfm/sigfm.hpp"
 #define FP_COMPONENT "print"
 #include "fpi-log.h"
@@ -45,20 +46,13 @@
  * prints in @print. Both print objects need to be of type #FPI_PRINT_NBIS
  * for this to work.
  */
-
 void fpi_print_add_print(FpPrint *print, FpPrint *add) {
-  g_return_if_fail(print->type == FPI_PRINT_NBIS ||
-                   print->type == FPI_PRINT_SIGFM);
-  g_return_if_fail(add->type == FPI_PRINT_NBIS || add->type == FPI_PRINT_SIGFM);
-  g_return_if_fail(add->type == print->type);
-  g_return_if_fail(add->prints->len > 0);
+  g_return_if_fail(print->type == FPI_PRINT_NBIS);
+  g_return_if_fail(add->type == FPI_PRINT_NBIS);
 
   g_assert(add->prints->len == 1);
-  void *to_add =
-      print->type == FPI_PRINT_NBIS
-          ? g_memdup(add->prints->pdata[0], sizeof(struct xyt_struct))
-          : (void *)sigfm_copy_info(add->prints->pdata[0]);
-  g_ptr_array_add(print->prints, to_add);
+  g_ptr_array_add(print->prints,
+                  g_memdup2(add->prints->pdata[0], sizeof(struct xyt_struct)));
 }
 
 /**
@@ -76,13 +70,25 @@ void fpi_print_set_type(FpPrint *print, FpiPrintType type) {
   g_return_if_fail(print->type == FPI_PRINT_UNDEFINED);
 
   print->type = type;
-  if (print->type == FPI_PRINT_NBIS || print->type == FPI_PRINT_SIGFM) {
+  if (print->type == FPI_PRINT_NBIS) {
     g_assert_null(print->prints);
-    print->prints = g_ptr_array_new_with_free_func(
-        print->type == FPI_PRINT_NBIS ? g_free
-                                      : (void (*)(void *))(sigfm_free_info));
+    print->prints = g_ptr_array_new_with_free_func(g_free);
   }
   g_object_notify(G_OBJECT(print), "fpi-type");
+}
+
+/**
+ * fpi_print_get_type:
+ * @print: A #FpPrint
+ *
+ * Retrieves the type of the print data.
+ *
+ * Returns: The #FpiPrintType of the print.
+ */
+FpiPrintType fpi_print_get_type(FpPrint *print) {
+  g_return_val_if_fail(FP_IS_PRINT(print), FPI_PRINT_UNDEFINED);
+
+  return print->type;
 }
 
 /**
@@ -147,59 +153,48 @@ static void minutiae_to_xyt(struct fp_minutiae *minutiae, int bwidth,
  *
  * Returns: %TRUE on success
  */
-
-gboolean
-fpi_print_add_from_image (FpPrint *print,
-                          FpImage *image,
-                          GError **error)
-{
+gboolean fpi_print_add_from_image(FpPrint *print, FpImage *image,
+                                  GError **error) {
   GPtrArray *minutiae;
   struct fp_minutiae _minutiae;
   struct xyt_struct *xyt;
 
   if ((print->type != FPI_PRINT_NBIS && print->type != FPI_PRINT_SIGFM) ||
-      !image)
-    {
-      g_set_error (error,
-                   G_IO_ERROR,
-                   G_IO_ERROR_INVALID_DATA,
-                   "Cannot add print data from image!");
+      !image) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                "Cannot add print data from image!");
+    return FALSE;
+  }
+  if (print->type == FPI_PRINT_NBIS) {
+    minutiae = fp_image_get_minutiae(image);
+    if (!minutiae || minutiae->len == 0) {
+      g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                  "No minutiae found in image or not yet detected!");
       return FALSE;
     }
-  if (print->type == FPI_PRINT_NBIS)
-    {
-      minutiae = fp_image_get_minutiae (image);
-      if (!minutiae || minutiae->len == 0)
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                       "No minutiae found in image or not yet detected!");
-          return FALSE;
-        }
 
-      _minutiae.num = minutiae->len;
-      _minutiae.list = (struct fp_minutia **) minutiae->pdata;
-      _minutiae.alloc = minutiae->len;
+    _minutiae.num = minutiae->len;
+    _minutiae.list = (struct fp_minutia **)minutiae->pdata;
+    _minutiae.alloc = minutiae->len;
 
-      xyt = g_new0 (struct xyt_struct, 1);
-      minutiae_to_xyt (&_minutiae, image->width, image->height, xyt);
-      g_ptr_array_add (print->prints, xyt);
-    }
-  else if (print->type == FPI_PRINT_SIGFM)
-    {
-      SigfmImgInfo * info = fp_image_get_sigfm_info (image);
-      g_ptr_array_add (print->prints, info);
-    }
+    xyt = g_new0(struct xyt_struct, 1);
+    minutiae_to_xyt(&_minutiae, image->width, image->height, xyt);
+    g_ptr_array_add(print->prints, xyt);
+  } else if (print->type == FPI_PRINT_SIGFM) {
+    SigfmImgInfo *info = fp_image_get_sigfm_info(image);
+    g_ptr_array_add(print->prints, info);
+  }
 
-  g_clear_object (&print->image);
-  print->image = g_object_ref (image);
-  g_object_notify (G_OBJECT (print), "image");
+  g_clear_object(&print->image);
+  print->image = g_object_ref(image);
+  g_object_notify(G_OBJECT(print), "image");
 
   return TRUE;
 }
 
 /**
  * fpi_print_bz3_match:
- * @template: A #FpPrint containing one or more prints
+ * @print_template: A #FpPrint containing one or more prints
  * @print: A newly scanned #FpPrint to test
  * @bz3_threshold: The BZ3 match threshold
  * @error: Return location for error
@@ -213,14 +208,14 @@ fpi_print_add_from_image (FpPrint *print,
  * Returns: Whether the prints match, @error will be set if #FPI_MATCH_ERROR is
  * returned
  */
-FpiMatchResult fpi_print_bz3_match(FpPrint *template, FpPrint *print,
+FpiMatchResult fpi_print_bz3_match(FpPrint *print_template, FpPrint *print,
                                    gint bz3_threshold, GError **error) {
   struct xyt_struct *pstruct;
   gint probe_len;
   gint i;
 
   /* XXX: Use a different error type? */
-  if (template->type != FPI_PRINT_NBIS) {
+  if (print_template->type != FPI_PRINT_NBIS || print->type != FPI_PRINT_NBIS) {
     *error = fpi_device_error_new_msg(
         FP_DEVICE_ERROR_NOT_SUPPORTED,
         "It is only possible to match NBIS type print data");
@@ -236,10 +231,10 @@ FpiMatchResult fpi_print_bz3_match(FpPrint *template, FpPrint *print,
   pstruct = g_ptr_array_index(print->prints, 0);
   probe_len = bozorth_probe_init(pstruct);
 
-  for (i = 0; i < template->prints->len; i++) {
+  for (i = 0; i < print_template->prints->len; i++) {
     struct xyt_struct *gstruct;
     gint score;
-    gstruct = g_ptr_array_index(template->prints, i);
+    gstruct = g_ptr_array_index(print_template->prints, i);
     score = bozorth_to_gallery(probe_len, pstruct, gstruct);
     fp_dbg("score %d/%d", score, bz3_threshold);
 
@@ -316,7 +311,7 @@ gchar *fpi_print_generate_user_id(FpPrint *print) {
   if (!username)
     username = "nobody";
 
-  if (g_strcmp0(g_getenv("FP_DEVICE_EMULATION"), "1") == 0)
+  if (fpi_device_emulation_mode_enabled(NULL))
     rand_id = 0;
   else
     rand_id = g_random_int();
@@ -340,8 +335,7 @@ gchar *fpi_print_generate_user_id(FpPrint *print) {
 gboolean fpi_print_fill_from_user_id(FpPrint *print, const char *user_id) {
   g_return_val_if_fail(user_id, FALSE);
 
-  /* The format has 24 bytes at the start and some dashes in the right places
-   */
+  /* The format has 24 bytes at the start and some dashes in the right places */
   if (g_str_has_prefix(user_id, "FP1-") && strlen(user_id) >= 24 &&
       user_id[12] == '-' && user_id[14] == '-' && user_id[23] == '-') {
     g_autofree gchar *copy = g_strdup(user_id);

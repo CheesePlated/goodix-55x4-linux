@@ -6,14 +6,17 @@ envs.set('G_MESSAGES_DEBUG', 'all')
 # Setup paths
 envs.set('MESON_SOURCE_ROOT', meson.project_source_root())
 envs.set('MESON_BUILD_ROOT', meson.project_build_root())
+envs.set('G_TEST_SRCDIR', meson.current_source_dir())
+envs.set('G_TEST_BUILDDIR', meson.current_build_dir())
 envs.prepend('LD_LIBRARY_PATH', meson.project_build_root() / 'libfprint')
 
-# Set FP_DEVICE_EMULATION so that drivers can adapt (e.g. to use fixed
+# Set fp_device_emulation_env_var so that drivers can adapt (e.g. to use fixed
 # random numbers rather than proper ones)
-envs.set('FP_DEVICE_EMULATION', '1')
+fp_device_emulation_env_var = 'FP_DEVICE_EMULATION'
+envs.set(fp_device_emulation_env_var, '1')
 
 # Set a colon-separated list of native drivers we enable in tests
-envs.set('FP_DRIVERS_WHITELIST', ':'.join([
+envs.set('FP_DRIVERS_ALLOWLIST', ':'.join([
     'virtual_image',
     'virtual_device',
     'virtual_device_storage',
@@ -23,34 +26,45 @@ envs.set('FP_PRINTS_PATH', meson.project_source_root() / 'examples' / 'prints')
 
 envs.set('NO_AT_BRIDGE', '1')
 
-python3 = find_program('python3')
-
 installed_tests = get_option('installed-tests')
 installed_tests_execdir = libexecdir / 'installed-tests' / versioned_libname
 installed_tests_testdir = datadir / 'installed-tests' / versioned_libname
 installed_tests_libdir = libdir
 
-drivers_tests = [
-    'aes2501',
-    'aes3500',
-    'elan',
-    'elan-cobo',
-    'elanmoc',
-    'elanspi',
-    'synaptics',
-    'upektc_img',
-    'upektc_img-tcs1s',
-    'uru4000-msv2',
-    'uru4000-4500',
-    'vfs0050',
-    'vfs301',
-    'vfs5011',
-    'vfs7552',
-    'goodixmoc',
-    'nb1010',
-    'egis0570',
-    'fpcmoc',
-]
+drivers_tests = {
+    'aes2501': { 'timeout': 20 },
+    'aes2550': {},
+    'aes3500': {},
+    'elan': {},
+    'elan-cobo': {},
+    'elanmoc': {},
+    'elanspi': { 'timeout': 30 },
+    'synaptics': {},
+    'upektc_img': {},
+    'upektc_img-tcs1s': {},
+    'uru4000-msv2': {},
+    'uru4000-4500': {},
+    'vfs0050': {},
+    'vfs301': {},
+    'vfs5011': {},
+    'vfs7552': {},
+    'goodixmoc': {},
+    'nb1010': {},
+    'egis0570': {},
+    'egismoc': {},
+    'egis_etu905': {},
+    'egismoc-05a1': {},
+    'egismoc-0586': {},
+    'egismoc-0587': {},
+    'fpcmoc': {},
+	'realtek': {},
+	'realtek-5816': {},
+	'realtek-storage-errors': {},
+    'focaltech_moc': { 'timeout': 30 },
+    'focaltech_moc-6553': {},
+    'mafpmoc': {},
+    'secugen': {},
+}
 
 if get_option('introspection')
   conf = configuration_data()
@@ -61,6 +75,25 @@ if get_option('introspection')
       output: 'create-driver-test.py')
 endif
 
+test_emulation_lib = shared_library('fprint-test-emulation',
+    'test-emulation.c',
+    dependencies: libfprint_private_dep,
+    install: installed_tests,
+    install_dir: installed_tests_execdir,
+)
+
+# Paths where the test-emulation helper may be loaded via dlopen
+test_emulation = configuration_data()
+test_emulation.set_quoted('FPI_EMULATION_ENV_VAR',
+  fp_device_emulation_env_var)
+test_emulation.set_quoted('FPI_EMULATION_HELPER_BUILDDIR',
+  meson.project_build_root() / 'tests')
+test_emulation.set_quoted('FPI_EMULATION_HELPER_INSTALLDIR',
+  libexecdir / 'installed-tests' / versioned_libname)
+test_emulation.set_quoted('FPI_EMULATION_HELPER_MODULE',
+  fs.name(test_emulation_lib.full_path()))
+configure_file(output: 'fpi-test-emulation.h', configuration: test_emulation)
+
 env_parser_cmd = '''
 import os;
 print(" ".join([f"{k}={v}" for k, v in os.environ.items()
@@ -70,6 +103,12 @@ print(" ".join([f"{k}={v}" for k, v in os.environ.items()
 envs_str = run_command(python3, '-c', env_parser_cmd,
     env: envs,
     check: installed_tests).stdout().strip()
+
+envs_str = ' '.join([
+    envs_str,
+    'G_TEST_SRCDIR=' + installed_tests_testdir,
+    'G_TEST_BUILDDIR=' + installed_tests_execdir,
+])
 
 if get_option('introspection')
     envs.prepend('GI_TYPELIB_PATH', meson.project_build_root() / 'libfprint')
@@ -88,11 +127,17 @@ if get_option('introspection')
             base_args = files(vdtest + '.py')
             suite = ['virtual-driver']
 
-            r = run_command(unittest_inspector, files(vdtest + '.py'), check: true)
+            r = run_command(unittest_inspector, files(vdtest + '.py'), check: false)
             unit_tests = r.stdout().strip().split('\n')
 
             if r.returncode() == 0 and unit_tests.length() > 0
                 suite += vdtest
+            elif r.returncode() == 77
+                test(vdtest,
+                    sh,
+                    args: ['-c', 'exit 77']
+                )
+                continue
             else
                 unit_tests = [vdtest]
             endif
@@ -108,7 +153,10 @@ if get_option('introspection')
                     python3,
                     args: ut_args,
                     suite: ut_suite,
-                    depends: libfprint_typelib,
+                    depends: [
+                        libfprint_typelib,
+                        test_emulation_lib,
+                    ],
                     env: envs,
                 )
             endforeach
@@ -124,8 +172,7 @@ if get_option('introspection')
                     output: vdtest + '.test',
                     install_dir: installed_tests_testdir,
                     configuration: {
-                        # FIXME: use fs.name() on meson 0.58
-                        'exec': installed_tests_execdir / '@0@'.format(base_args[0]).split('/')[-1],
+                        'exec': installed_tests_execdir / fs.name(base_args[0]),
                         'env': ' '.join([
                             envs_str,
                             'LD_LIBRARY_PATH=' + installed_tests_libdir,
@@ -139,32 +186,62 @@ if get_option('introspection')
             endif
         else
             test(vdtest,
-                find_program('sh'),
+                sh,
                 args: ['-c', 'exit 77']
             )
         endif
     endforeach
 
     driver_tests_enabled = false
-    foreach driver_test: drivers_tests
+    foreach driver_test, args: drivers_tests
         driver_name = driver_test.split('-')[0]
         driver_envs = envs
-        driver_envs.set('FP_DRIVERS_WHITELIST', driver_name)
+        driver_envs.set('FP_DRIVERS_ALLOWLIST', driver_name)
 
         if (driver_name in supported_drivers and
             gusb_dep.version().version_compare('>= 0.3.0'))
-            driver_tests_enabled = true
-            test(driver_test,
-                python3,
-                args: [
-                    umockdev_test.full_path(),
-                    meson.current_source_dir() / driver_test,
-                ],
-                env: driver_envs,
-                suite: ['drivers'],
-                timeout: 15,
-                depends: libfprint_typelib,
-            )
+
+            test_types = []
+            foreach test_type: args.get('test_types', ['custom', 'capture'])
+                test_file_prefix = meson.current_source_dir() / driver_test / test_type
+                if fs.exists(test_file_prefix + '.py')
+                    test_types += [test_type]
+                elif fs.exists(test_file_prefix + '.png')
+                    test_types += [test_type]
+                elif fs.exists(test_file_prefix + '.ioctl')
+                    test_types += [test_type]
+                elif fs.exists(test_file_prefix + '.pcapng')
+                    test_types += [test_type]
+                endif
+            endforeach
+
+            assert(test_types.length() > 0,
+                'No test types found for driver ' + driver_test)
+
+            foreach test_type: test_types
+                driver_tests_enabled = true
+                test_name = driver_test + (test_types.length() > 1 ? '-' + test_type : '')
+                test(test_name,
+                    python3,
+                    args: [
+                        umockdev_test.full_path(),
+                        meson.current_source_dir() / driver_test,
+                        '--test', test_type,
+                    ],
+                    env: driver_envs,
+                    is_parallel: args.get('is_parallel', true),
+                    priority: args.get('priority', 0),
+                    protocol: args.get('protocol', 'exitcode'),
+                    should_fail: args.get('should_fail', false),
+                    suite: ['drivers', test_type] + args.get('suite', []),
+                    timeout: args.get('timeout', 15),
+                    verbose: args.get('verbose', false),
+                    depends: [
+                        libfprint_typelib,
+                        test_emulation_lib,
+                    ],
+                )
+            endforeach
 
             if installed_tests
                 driver_envs_str = run_command(python3, '-c', env_parser_cmd,
@@ -193,7 +270,7 @@ if get_option('introspection')
             endif
         else
             test(driver_test,
-                find_program('sh'),
+                sh,
                 args: ['-c', 'exit 77']
             )
         endif
@@ -212,13 +289,13 @@ if get_option('introspection')
 else
     warning('Skipping all driver tests as introspection bindings are missing')
     test('virtual-image',
-        find_program('sh'),
+        sh,
         args: ['-c', 'exit 77']
     )
 
-    foreach driver_test: drivers_tests
+    foreach driver_test, _args : drivers_tests
         test(driver_test,
-            find_program('sh'),
+            sh,
             args: ['-c', 'exit 77']
         )
     endforeach
@@ -238,24 +315,6 @@ unit_tests = [
     'fpi-assembling',
 ]
 
-if 'goodixtls55x4' in drivers
-    goodix_tls_tests = executable('test-goodix-tls',
-        ['test-goodix-tls.c', '../libfprint/drivers/goodixtls/goodixtls.c'],
-        include_directories: [root_inc, include_directories('../libfprint')],
-        dependencies: [glib_dep, gio_dep, gusb_dep, openssl_dep, threads_dep])
-    test('goodix-tls', goodix_tls_tests, suite: 'unit-tests')
-    goodix_deactivate_tests = executable('test-goodix-deactivate',
-        'test-goodix-deactivate.c',
-        dependencies: libfprint_private_dep,
-        link_with: libfprint_drivers)
-    test('goodix-deactivate', goodix_deactivate_tests, suite: 'unit-tests', env: envs)
-    goodix_packet_tests = executable('test-goodix-packets',
-        'test-goodix-packets.c',
-        dependencies: libfprint_private_dep,
-        link_with: libfprint_drivers)
-    test('goodix-packets', goodix_packet_tests, suite: 'unit-tests', env: envs)
-endif
-
 if 'virtual_image' in drivers
     unit_tests += [
         'fp-context',
@@ -264,10 +323,6 @@ if 'virtual_image' in drivers
 endif
 
 unit_tests_deps = { 'fpi-assembling' : [cairo_dep] }
-
-test_config = configuration_data()
-test_config.set_quoted('SOURCE_ROOT', meson.project_source_root())
-test_config_h = configure_file(output: 'test-config.h', configuration: test_config)
 
 foreach test_name: unit_tests
     if unit_tests_deps.has_key(test_name)
@@ -283,7 +338,7 @@ foreach test_name: unit_tests
             # Create a dummy test that always skips instead
             warning('Test @0@ cannot be compiled due to missing dependencies'.format(test_name))
             test(test_name,
-                find_program('sh'),
+                sh,
                 suite: ['unit-tests'],
                 args: ['-c', 'exit 77'],
             )
@@ -296,7 +351,7 @@ foreach test_name: unit_tests
 
     basename = 'test-' + test_name
     test_exe = executable(basename,
-        sources: [basename + '.c', test_config_h],
+        sources: basename + '.c',
         dependencies: [ libfprint_private_dep ] + extra_deps,
         c_args: common_cflags,
         link_whole: test_utils,
@@ -324,15 +379,29 @@ foreach test_name: unit_tests
 endforeach
 
 # Run udev rule generator with fatal warnings
-envs.set('UDEV_HWDB', udev_hwdb.full_path())
-envs.set('UDEV_HWDB_CHECK_CONTENTS', default_drivers_are_enabled ? '1' : '0')
+hwdb_envs = envs
+hwdb_envs.set('UDEV_HWDB', udev_hwdb.full_path())
+hwdb_envs.set('UDEV_HWDB_CHECK_CONTENTS', default_drivers_are_enabled ? '1' : '0')
+hwdb_envs.set('G_MESSAGES_DEBUG', '')
 test('udev-hwdb',
      find_program('test-generated-hwdb.sh'),
      depends: udev_hwdb,
-     env: envs)
+     suite: ['data', 'no-valgrind'],
+     env: hwdb_envs,
+)
+
+appstreamcli = find_program('appstreamcli', required: false)
+if appstreamcli.found()
+    test('metainfo-validate',
+        appstreamcli,
+        args: ['validate', metainfo_generator],
+        depends: metainfo_generator,
+        suite: ['data', 'no-valgrind'],
+    )
+endif
 
 gdb = find_program('gdb', required: false)
-if gdb.found()
+if gdb.found() and libfprint_sanitizers.length() == 0
     libfprint_wrapper = [
         gdb.full_path(),
         '-batch',
@@ -347,14 +416,32 @@ if gdb.found()
         ])
 endif
 
+if ('address' in libfprint_sanitizers or
+    'undefined' in libfprint_sanitizers or
+    'leak' in libfprint_sanitizers)
+    add_test_setup('sanitizers',
+        is_default: true,
+        timeout_multiplier: 3,
+        env: [
+            'ASAN_OPTIONS=verify_asan_link_order=0',
+        ])
+endif
+
 valgrind = find_program('valgrind', required: false)
-if valgrind.found()
-    glib_share = glib_dep.get_pkgconfig_variable('prefix') / 'share' / glib_dep.name()
+if valgrind.found() and libfprint_sanitizers.length() == 0
+    glib_share = glib_dep.get_variable(pkgconfig: 'prefix') / 'share' / glib_dep.name()
     glib_suppressions = glib_share + '/valgrind/glib.supp'
-    libfprint_suppressions = '@0@/@1@'.format(meson.project_source_root(),
-        files('libfprint.supp')[0])
-    python_suppressions = '@0@/@1@'.format(meson.project_source_root(),
-        files('valgrind-python.supp')[0])
+    libfprint_suppressions = files('libfprint.supp')[0]
+    python_suppressions = files('valgrind-python.supp')[0]
+
+    if meson.version().version_compare('>=1.4')
+        libfprint_suppressions = libfprint_suppressions.full_path()
+        python_suppressions = python_suppressions.full_path()
+    else
+        libfprint_suppressions = meson.project_source_root() / '@0@'.format(libfprint_suppressions)
+        python_suppressions = meson.project_source_root() / '@0@'.format(python_suppressions)
+    endif
+
     libfprint_wrapper = [
         valgrind.full_path(),
         '--tool=memcheck',
@@ -371,11 +458,14 @@ if valgrind.found()
         '--suppressions=' + python_suppressions,
     ]
     add_test_setup('valgrind',
-        timeout_multiplier: 15,
+        timeout_multiplier: 20,
         exe_wrapper: libfprint_wrapper,
+        exclude_suites: ['no-valgrind'],
         env: [
             'G_SLICE=always-malloc',
             'UNDER_VALGRIND=1',
+            'FP_VIRTUAL_IMAGE_HOT_SECONDS=-1',
+            'FP_VIRTUAL_DEVICE_HOT_SECONDS=-1',
             'LIBFPRINT_TEST_WRAPPER=' + ' '.join(libfprint_wrapper),
         ])
 endif
